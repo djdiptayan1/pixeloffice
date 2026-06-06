@@ -43,6 +43,9 @@ import {
   type WelcomePayload,
 } from "@pixeloffice/shared";
 import { container } from "../container";
+import { createLogger } from "../logging/logger";
+
+const log = createLogger("room");
 
 const TICK_MS = 3000;
 const MAX_CHAT = 140;
@@ -103,6 +106,7 @@ export class OfficeRoom extends Room {
     });
 
     presence.on("meeting-started", ({ sessionId, meeting }) => {
+      log.info("meeting started for participant", { meetingId: meeting.id, title: meeting.title, sessionId });
       const client = this.clientFor(sessionId);
       if (client) client.send(S2C.MEETING_STARTED, { meeting });
     });
@@ -118,6 +122,7 @@ export class OfficeRoom extends Room {
     });
 
     events.on("created", (event: SocialEvent) => {
+      log.info("social event created", { type: event.type, title: event.title, area: event.areaName });
       this.broadcast(S2C.EVENT_CREATED, { event });
       const toast: ToastPayload = {
         message: `☕ ${event.title} started — join in the ${event.areaName}!`,
@@ -200,10 +205,19 @@ export class OfficeRoom extends Room {
     // Tell everyone else this player joined.
     const joined: PlayerJoinedPayload = { player: { ...snapshot } };
     this.broadcastExcept(client, S2C.PLAYER_JOINED, joined);
+
+    log.info("player joined", {
+      name: identity.name,
+      department: identity.department,
+      sessionId: client.sessionId,
+      online: this.players.size,
+    });
   }
 
   onLeave(client: Client): void {
     const sessionId = client.sessionId;
+    const leaving = this.players.get(sessionId);
+    log.info("player left", { name: leaving?.name, sessionId, online: this.players.size - 1 });
     container.presence.untrack(sessionId);
     container.events.removeParticipant(sessionId);
     this.players.delete(sessionId);

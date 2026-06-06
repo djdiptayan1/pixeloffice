@@ -94,6 +94,9 @@ async function main(): Promise<void> {
 
   const gameServer = new Server({
     transport: new WebSocketTransport({ server: httpServer }),
+    // Our lifecycle module owns SIGINT/SIGTERM; Colyseus's built-in handler
+    // would race it and log "already_shutting_down" (seen in live logs).
+    gracefullyShutdown: false,
   });
 
   gameServer.define(ROOM_NAME, OfficeRoom);

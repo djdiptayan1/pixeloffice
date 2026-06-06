@@ -18,6 +18,9 @@ import {
 import { container } from "../container";
 import { isSocialEventType } from "../events/event.service";
 import { createAdminGuard } from "../auth/middleware";
+import { createLogger } from "../logging/logger";
+
+const log = createLogger("admin");
 
 const DEFAULT_EVENT_MINUTES = 15;
 const DEFAULT_MEETING_DURATION = 30;
@@ -108,6 +111,7 @@ export function createAdminRouter(): Router {
     }
     const toast: ToastPayload = { message, kind: "broadcast" };
     room.broadcast(S2C.TOAST, toast);
+    log.info("broadcast sent", { length: message.length });
     res.status(202).json({ ok: true });
   });
 
@@ -131,6 +135,14 @@ export function createAdminRouter(): Router {
       { title, startsInMinutes, durationMinutes, participantIds },
       Date.now(),
     );
+    log.info("meeting scheduled", {
+      meetingId: meeting.id,
+      title: meeting.title,
+      room: meeting.roomName,
+      startsInMinutes,
+      durationMinutes,
+      invitees: participantIds.length || "everyone",
+    });
     res.status(201).json({ meeting });
   });
 

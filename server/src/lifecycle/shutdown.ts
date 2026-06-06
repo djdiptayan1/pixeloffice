@@ -141,8 +141,12 @@ export function installShutdown(deps: ShutdownDeps): void {
 function closeHttp(server: HttpServerLike, log: Pick<Console, "error">): Promise<void> {
   return new Promise<void>((resolve) => {
     try {
-      server.close((err?: Error) => {
-        if (err) log.error("[shutdown] http close error", err);
+      server.close((err?: Error & { code?: string }) => {
+        // Colyseus's gracefullyShutdown() already closes the shared server;
+        // a second close reports ERR_SERVER_NOT_RUNNING — that's success here.
+        if (err && err.code !== "ERR_SERVER_NOT_RUNNING") {
+          log.error("[shutdown] http close error", err);
+        }
         resolve();
       });
     } catch (err) {
