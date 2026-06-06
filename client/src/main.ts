@@ -28,16 +28,25 @@ import {
   type PlayerJoinedPayload,
   type PlayerLeftPayload,
   type PlayerMovedPayload,
+  type PlayerUpdatedPayload,
   type PlayerTeleportedPayload,
   type PresencePayload,
   type SetStatusPayload,
   type ToastPayload,
   type WelcomePayload,
+  type GameUpdatePayload,
 } from "@pixeloffice/shared";
 import { Connection, serverHttpBase } from "./net/connection";
 import { createOfficeGame, type OfficeGameHandle } from "./game";
 import { Store } from "./ui/state";
-import { createLogin, type JoinSubmission } from "./ui/login";
+import {
+  createLogin,
+  persistLoginProfile,
+  readStoredToken,
+  clearStoredToken,
+  type JoinSubmission,
+} from "./ui/login";
+import { openProfileModal } from "./ui/profile";
 import { createHud, type HudHandle } from "./ui/hud";
 import { Toasts } from "./ui/toasts";
 import { createAdmin } from "./ui/admin";
@@ -158,6 +167,45 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
       localStore.movePlayer(selfId, x, y, dir, moving);
     },
     onAreaChange: (areaName) => localStore.setSelfArea(areaName),
+    onInteractPrompt: (prompt, gameId) => localStore.setInteractPrompt(prompt, gameId),
+    onGameInteract: (gameId) => {
+      conn.send(C2S.JOIN_GAME, { gameId });
+    },
+    // Double-clicking the local avatar opens the profile modal.
+    onProfileOpen: () => {
+      const self = localStore.self();
+      if (!self) return;
+      openProfileModal({
+        parent: hudRoot,
+        current: { name: self.name, department: self.department, avatarId: self.avatarId },
+        onSave: (draft) => {
+          conn.send(C2S.UPDATE_PROFILE, draft);
+          // Keep reconnects + the next session in sync with the edit.
+          conn.updateJoinProfile(draft);
+          persistLoginProfile(draft);
+          // Optimistic local apply; the server also broadcasts PLAYER_UPDATED.
+          localGame.updatePlayer(selfId, draft);
+          localStore.upsertPlayer({ ...self, ...draft });
+        },
+        onLogout: () => {
+          void (async () => {
+            // End the real greytHR session server-side (best-effort), then drop
+            // the local token and return to the sign-in screen.
+            const token = readStoredToken();
+            try {
+              await fetch(`${serverHttpBase()}/api/auth/greythr/logout`, {
+                method: "POST",
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+              });
+            } catch {
+              /* best-effort: still sign out locally */
+            }
+            clearStoredToken();
+            conn.close(); // "offline" -> teardown + login screen
+          })();
+        },
+      });
+    },
   });
   game = localGame;
 
@@ -180,6 +228,8 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     },
     onSendChat: (text) => conn.send(C2S.CHAT, { text }),
     onChatFocus: (focused) => localGame.setInputLocked(focused),
+    onLeaveGame: (gameId) => conn.send(C2S.LEAVE_GAME, { gameId }),
+    onGameInput: (gameId, input) => conn.send(C2S.GAME_INPUT, { gameId, input }),
   });
 
   const localHud = hud;
@@ -246,6 +296,13 @@ function registerBridge(conn: Connection): void {
     game.removePlayer(sessionId);
   });
 
+  conn.on<PlayerUpdatedPayload>(S2C.PLAYER_UPDATED, ({ sessionId, name, department, avatarId }) => {
+    if (!game || !store) return;
+    const p = store.get().players.get(sessionId);
+    if (p) store.upsertPlayer({ ...p, name, department, avatarId });
+    game.updatePlayer(sessionId, { name, department, avatarId });
+  });
+
   conn.on<PlayerMovedPayload>(S2C.PLAYER_MOVED, ({ sessionId, x, y, dir, moving }) => {
     if (!game || !store) return;
     if (sessionId === selfId) return; // local avatar is authoritative client-side
@@ -293,6 +350,11 @@ function registerBridge(conn: Connection): void {
 
   conn.on<ToastPayload>(S2C.TOAST, ({ message, kind }) => {
     toasts.show(message, kind);
+  });
+
+  conn.on<GameUpdatePayload>(S2C.GAME_UPDATE, ({ game }) => {
+    if (!store) return;
+    store.setGame(game);
   });
 }
 
