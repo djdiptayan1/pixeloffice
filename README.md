@@ -14,8 +14,12 @@ capture, or productivity scoring, ever.
 ![The office](docs/screenshots/office.png)
 
 <p align="center">
-  <img src="docs/screenshots/login.png" width="49%" alt="Login screen" />
   <img src="docs/screenshots/coffee-break.png" width="49%" alt="A coffee break in the Coffee Area" />
+  <img src="docs/screenshots/meeting.png" width="49%" alt="A meeting starting — pulsing Join button, never auto-teleport" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/login.png" width="60%" alt="Login screen" />
 </p>
 
 **Docs:** [Player Guide](docs/GAMEPLAY.md) · [Architecture](docs/ARCHITECTURE.md) ·

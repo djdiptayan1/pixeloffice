@@ -27,11 +27,13 @@ import {
 // In any other topology (SERVE_CLIENT single-container behind an https proxy on
 // 443, a LAN preview, etc.) the client is served from the SAME origin as the
 // server, so we must dial that same host:port — NOT a hardcoded :2567.
-const VITE_DEV_PORT = "5173";
+// 5173 = vite dev, 4173 = vite preview — both serve ONLY the client, so the
+// API/ws lives on DEFAULT_SERVER_PORT. Anything else is same-origin.
+const SEPARATE_API_PORTS = new Set(["5173", "4173"]);
 
-/** True when this page is being served by the Vite dev server (separate API). */
+/** True when this page is served by Vite (dev or preview) — separate API. */
 function isViteDev(): boolean {
-  return location.port === VITE_DEV_PORT;
+  return SEPARATE_API_PORTS.has(location.port);
 }
 
 /** host[:port] to dial. In dev the API runs on DEFAULT_SERVER_PORT; otherwise
