@@ -14,7 +14,7 @@ import {
 
 export interface JoinResult {
   event: SocialEvent;
-  /** Position in participantIds — used to pick the seating anchor. */
+  /** Stable seat slot (lowest free index) — used to pick the seating anchor. */
   anchorIndex: number;
 }
 
@@ -32,11 +32,15 @@ export function isSocialEventType(value: unknown): value is SocialEventType {
  */
 export class EventService extends EventEmitter {
   private readonly events = new Map<string, SocialEvent>();
+  /** Per-event stable seat slots: eventId -> (sessionId -> slotIndex). */
+  private readonly slots = new Map<string, Map<string, number>>();
 
   createEvent(type: SocialEventType, title: string, durationMinutes: number, nowMs: number): SocialEvent {
     const start = nowMs;
     const event: SocialEvent = {
-      id: `event_${Date.now()}_${eventSeq++}`,
+      // Derive the id from the injected clock (honors the "never reads the
+      // system clock" contract and keeps ids deterministic under test).
+      id: `event_${nowMs}_${eventSeq++}`,
       type,
       title,
       areaName: EVENT_AREA[type],
@@ -58,13 +62,19 @@ export class EventService extends EventEmitter {
     return this.events.get(eventId) ?? null;
   }
 
-  join(eventId: string, sessionId: string): JoinResult | null {
+  /**
+   * Join an event. `nowMs` rejects an already-expired event (the lazy tick may
+   * not have removed it yet). The seat slot is the LOWEST FREE index and is
+   * stable across re-joins — deriving it from array push position would hand a
+   * new joiner an index a still-seated participant occupies after a leave.
+   */
+  join(eventId: string, sessionId: string, nowMs: number): JoinResult | null {
     const event = this.events.get(eventId);
     if (!event) return null;
-    let anchorIndex = event.participantIds.indexOf(sessionId);
-    if (anchorIndex === -1) {
+    if (nowMs >= event.endTime) return null; // expired-but-not-yet-swept
+    const anchorIndex = this.assignSlot(eventId, sessionId);
+    if (!event.participantIds.includes(sessionId)) {
       event.participantIds.push(sessionId);
-      anchorIndex = event.participantIds.length - 1;
       this.emit("updated", event);
     }
     return { event, anchorIndex };
@@ -76,6 +86,7 @@ export class EventService extends EventEmitter {
     const idx = event.participantIds.indexOf(sessionId);
     if (idx !== -1) {
       event.participantIds.splice(idx, 1);
+      this.releaseSlot(eventId, sessionId);
       this.emit("updated", event);
     }
     return event;
@@ -87,9 +98,33 @@ export class EventService extends EventEmitter {
       const idx = event.participantIds.indexOf(sessionId);
       if (idx !== -1) {
         event.participantIds.splice(idx, 1);
+        this.releaseSlot(event.id, sessionId);
         this.emit("updated", event);
       }
     }
+  }
+
+  /** Lowest-free stable seat slot for a session in an event (idempotent). */
+  private assignSlot(eventId: string, sessionId: string): number {
+    let slots = this.slots.get(eventId);
+    if (!slots) {
+      slots = new Map<string, number>();
+      this.slots.set(eventId, slots);
+    }
+    const existing = slots.get(sessionId);
+    if (existing !== undefined) return existing;
+    const taken = new Set(slots.values());
+    let slot = 0;
+    while (taken.has(slot)) slot++;
+    slots.set(sessionId, slot);
+    return slot;
+  }
+
+  private releaseSlot(eventId: string, sessionId: string): void {
+    const slots = this.slots.get(eventId);
+    if (!slots) return;
+    slots.delete(sessionId);
+    if (slots.size === 0) this.slots.delete(eventId);
   }
 
   /** Is this session currently in any active (not-yet-expired) event as of `nowMs`? */
@@ -105,6 +140,7 @@ export class EventService extends EventEmitter {
     for (const [id, event] of this.events) {
       if (nowMs >= event.endTime) {
         this.events.delete(id);
+        this.slots.delete(id);
         this.emit("ended", id);
       }
     }

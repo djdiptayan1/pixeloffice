@@ -38,8 +38,23 @@ async function main(): Promise<void> {
   await initContainer();
 
   const app = express();
-  app.use(cors());
+
+  // CORS: restrict to the client app origin instead of wildcard `*`, so a
+  // logged-in user's other tabs/sites cannot cross-origin read the API (roster
+  // PII, session claims). CONTRACT.md: "CORS enabled for the Vite origin".
+  // CORS_ORIGINS (comma-separated) overrides; default is the client app URL.
+  const corsOrigins = (process.env.CORS_ORIGINS ?? process.env.CLIENT_APP_URL ?? "http://localhost:5173")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  app.use(cors({ origin: corsOrigins }));
   app.use(express.json());
+
+  // Behind a vetted reverse proxy (the single-container prod deploy), trust the
+  // forwarded chain so the rate limiter keys off the real client IP rather than
+  // collapsing every user into the proxy's single bucket. Off by default.
+  const trustProxy = ["true", "1", "yes"].includes((process.env.TRUST_PROXY ?? "").toLowerCase());
+  if (trustProxy) app.set("trust proxy", true);
 
   // Rate limit the REST API (60 req/min/IP; GET /api/health auto-skipped).
   app.use(
@@ -47,6 +62,7 @@ async function main(): Promise<void> {
     createRateLimiter({
       capacity: Number(process.env.API_RATE_LIMIT ?? 60),
       windowMs: Number(process.env.API_RATE_WINDOW_MS ?? 60_000),
+      trustProxy,
     }),
   );
 
@@ -72,6 +88,18 @@ async function main(): Promise<void> {
     createHrRouter({
       attendance: container.attendance,
       hr: container.hr,
+      portalUrl: container.hrPortalUrl,
+      // Only resolve the GreytHR employee code (via email lookup) when the REAL
+      // adapter is active; the mock ignores the id and synthetic dev emails do
+      // not resolve, so the dev path keeps the userId pass-through.
+      resolveEmployeeByEmail: container.hrConfigured,
+      // Wire the auth gate so AUTH_REQUIRED actually enforces JWT identity on the
+      // attendance routes in production (without this, the IDOR-closing guard is
+      // never installed and identity falls back to the client-supplied sessionId).
+      auth: {
+        jwt: container.authConfig.jwt,
+        required: container.authConfig.authRequired,
+      },
       resolveSession(sessionId): SessionUser | null {
         const room = container.registry.room;
         if (!room) return null;
@@ -84,11 +112,37 @@ async function main(): Promise<void> {
     }),
   );
 
+  // Uniform JSON 404 for unmatched /api routes (every real handler returns
+  // {error}). Registered AFTER the API routers but BEFORE the SPA fallback so an
+  // unknown /api path is never served index.html nor the Express HTML 404 page.
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ error: "Not found" });
+  });
+
   // Static client (single-container production image). Registered LAST so the
   // SPA fallback never swallows /api routes. Off unless SERVE_CLIENT=true.
   if (shouldServeClient()) {
     mountStaticClient(app);
   }
+
+  // Terminal error handler: log server-side, return a generic JSON body. Without
+  // this Express's default finalhandler serializes err.stack (absolute paths,
+  // internal frames) into the response — reachable unauthenticated by POSTing
+  // malformed JSON to any /api route. Never echo err.message/err.stack.
+  app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("[PixelOffice] unhandled request error:", err);
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    const status =
+      typeof err === "object" && err !== null && "status" in err && typeof (err as { status: unknown }).status === "number"
+        ? (err as { status: number }).status
+        : typeof err === "object" && err !== null && "statusCode" in err && typeof (err as { statusCode: unknown }).statusCode === "number"
+          ? (err as { statusCode: number }).statusCode
+          : 500;
+    res.status(status).json({ error: "Internal server error" });
+  });
 
   const httpServer = createServer(app);
 

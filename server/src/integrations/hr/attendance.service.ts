@@ -49,6 +49,8 @@ export interface AttendanceChange {
  */
 export class AttendanceService extends EventEmitter {
   private readonly states = new Map<string, AttendanceState>();
+  /** Cache: office user email -> resolved GreytHR employee id (or null miss). */
+  private readonly employeeIdByEmail = new Map<string, string | null>();
 
   constructor(private readonly hr: HrAdapter) {
     super();
@@ -70,8 +72,10 @@ export class AttendanceService extends EventEmitter {
    * route, invoked by a button click. Allowed from any state (re-check-in from
    * CHECKED_OUT; idempotent if already CHECKED_IN — still records the action).
    */
-  async checkIn(userId: string, atMs: number): Promise<AttendanceResult> {
-    const result = await this.safe(() => this.hr.checkIn(userId, atMs), atMs, "CHECKED_IN");
+  async checkIn(userId: string, atMs: number, email?: string): Promise<AttendanceResult> {
+    const employeeId = await this.resolveEmployeeId(userId, email, atMs);
+    if (typeof employeeId !== "string") return employeeId; // resolution failed
+    const result = await this.safe(() => this.hr.checkIn(employeeId, atMs), atMs, "CHECKED_IN");
     if (result.ok) this.commit(userId, "CHECKED_IN", result.recordedAtMs);
     return result;
   }
@@ -80,10 +84,12 @@ export class AttendanceService extends EventEmitter {
    * EXPLICIT user-initiated check-out. The ONLY caller is the /api/hr/check-out
    * route, invoked by a button click.
    */
-  async checkOut(userId: string, atMs: number): Promise<AttendanceResult> {
+  async checkOut(userId: string, atMs: number, email?: string): Promise<AttendanceResult> {
     // Guard: checking out when not checked in is a no-op state-wise, but we
     // still honor the explicit action by delegating; the adapter decides.
-    const result = await this.safe(() => this.hr.checkOut(userId, atMs), atMs, "CHECKED_OUT");
+    const employeeId = await this.resolveEmployeeId(userId, email, atMs);
+    if (typeof employeeId !== "string") return employeeId; // resolution failed
+    const result = await this.safe(() => this.hr.checkOut(employeeId, atMs), atMs, "CHECKED_OUT");
     if (result.ok) this.commit(userId, "CHECKED_OUT", result.recordedAtMs);
     return result;
   }
@@ -94,6 +100,51 @@ export class AttendanceService extends EventEmitter {
   }
 
   // --- private --------------------------------------------------------------
+
+  /**
+   * Resolve the GreytHR EMPLOYEE id to swipe against. The office userId
+   * (`dev:<slug>:<rand>` or an IdP subject) is NOT a GreytHR employee code, so
+   * when an `email` is supplied we look the employee up and swipe against the
+   * returned id (cached per email). Returns the employee id on success, or a
+   * graceful {ok:false} AttendanceResult when the lookup yields no employee.
+   *
+   * When no email is supplied (mock/dev convenience and unit tests), the userId
+   * is passed through unchanged — the mock adapter ignores the id anyway.
+   */
+  private async resolveEmployeeId(
+    userId: string,
+    email: string | undefined,
+    atMs: number,
+  ): Promise<string | AttendanceResult> {
+    if (!email) return userId;
+
+    const key = email.toLowerCase();
+    let employeeId = this.employeeIdByEmail.get(key);
+    if (employeeId === undefined) {
+      try {
+        const employee = await this.hr.lookupEmployee(email);
+        employeeId = employee && employee.id ? employee.id : null;
+      } catch {
+        employeeId = null; // lookup failed; treat as a miss this call (don't cache)
+        return {
+          ok: false,
+          recordedAtMs: atMs,
+          status: "CHECKED_IN",
+          reason: "HR employee lookup unavailable",
+        };
+      }
+      this.employeeIdByEmail.set(key, employeeId);
+    }
+    if (!employeeId) {
+      return {
+        ok: false,
+        recordedAtMs: atMs,
+        status: "CHECKED_IN",
+        reason: "No GreytHR employee found for this user",
+      };
+    }
+    return employeeId;
+  }
 
   /** Mutate local state + emit. Only reached on a successful adapter call. */
   private commit(userId: string, status: AttendanceStatus, atMs: number): void {

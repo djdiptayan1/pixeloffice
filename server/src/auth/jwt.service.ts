@@ -109,6 +109,9 @@ export class JwtService {
     const decoded = jwt.verify(token, this.secret, {
       algorithms: [SIGNING_ALGORITHM],
       issuer: this.issuer,
+      // A few seconds of slack absorbs minor inter-host clock skew (multi-
+      // instance deploys) without meaningfully weakening expiry enforcement.
+      clockTolerance: 5,
     }) as JwtPayload;
 
     const sub = decoded.sub;

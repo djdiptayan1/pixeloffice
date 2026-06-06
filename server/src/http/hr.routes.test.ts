@@ -174,4 +174,42 @@ describe("HR routes — dev path (no auth)", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("omits portalUrl from status when not configured (mock path)", async () => {
+    const res = await fetch(`${base}/api/hr/status?sessionId=alice-session`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("portalUrl");
+  });
+});
+
+describe("HR routes — portalUrl surfaced when configured", () => {
+  let server: Server;
+  let base: string;
+  const sessions: Record<string, SessionUser> = {
+    "alice-session": { userId: "alice", name: "Alice", email: "alice@x.dev" },
+  };
+  const PORTAL = "https://kalvium.greythr.com/v3/portal/ess/home";
+
+  beforeEach(async () => {
+    const app = makeApp({
+      attendance: new AttendanceService(new MockGreytHrAdapter()),
+      hr: new MockGreytHrAdapter(),
+      resolveSession: (sid) => sessions[sid] ?? null,
+      portalUrl: PORTAL,
+      now: () => 1000,
+    });
+    ({ server, base } = await boot(app));
+  });
+
+  afterEach(() => {
+    server.close();
+  });
+
+  it("includes portalUrl in the status response", async () => {
+    const res = await fetch(`${base}/api/hr/status?sessionId=alice-session`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { portalUrl?: string };
+    expect(body.portalUrl).toBe(PORTAL);
+  });
 });

@@ -29,6 +29,56 @@ export interface DatabaseConfig {
   connectionString: string;
   /** Run db/init.sql at startup. Defaults to true when a connection string is set. */
   autoMigrate?: boolean;
+  /**
+   * SSL override. When omitted it is derived from the connection string's
+   * `sslmode` and the DATABASE_SSL / PGSSLMODE env (see sslOption). Most managed
+   * providers (RDS/Heroku/Supabase/Neon/Render) REQUIRE TLS, so without this the
+   * pool would throw and the factory would silently degrade to in-memory.
+   */
+  ssl?: boolean | { rejectUnauthorized: boolean };
+}
+
+/**
+ * Resolve the pg `ssl` Pool option from an explicit override, the connection
+ * string's `sslmode`, or the DATABASE_SSL / PGSSLMODE env. Returns an object to
+ * spread into the Pool config (empty = no ssl key, i.e. plain TCP for local dev).
+ *
+ *   sslmode=disable        -> ssl: false
+ *   sslmode=require        -> ssl: { rejectUnauthorized: true }
+ *   sslmode=no-verify      -> ssl: { rejectUnauthorized: false }
+ *   sslmode=verify-(ca|full) -> ssl: { rejectUnauthorized: true }
+ *   DATABASE_SSL=true|1|require        -> ssl: { rejectUnauthorized: true }
+ *   DATABASE_SSL=no-verify|insecure    -> ssl: { rejectUnauthorized: false }
+ */
+export function sslOption(
+  connectionString: string,
+  override?: boolean | { rejectUnauthorized: boolean },
+  env: NodeJS.ProcessEnv = process.env,
+): { ssl?: boolean | { rejectUnauthorized: boolean } } {
+  if (override !== undefined) return { ssl: override };
+
+  const mode = sslModeFromUrl(connectionString);
+  if (mode === "disable") return { ssl: false };
+  if (mode === "no-verify") return { ssl: { rejectUnauthorized: false } };
+  if (mode) return { ssl: { rejectUnauthorized: true } }; // require / verify-*
+
+  const envSsl = (env.DATABASE_SSL ?? env.PGSSLMODE ?? "").trim().toLowerCase();
+  if (!envSsl) return {}; // no SSL configured -> plain TCP (local dev default)
+  if (["false", "0", "no", "disable"].includes(envSsl)) return { ssl: false };
+  if (["no-verify", "insecure", "allow", "prefer"].includes(envSsl)) {
+    return { ssl: { rejectUnauthorized: false } };
+  }
+  return { ssl: { rejectUnauthorized: true } }; // true / 1 / require / verify-*
+}
+
+function sslModeFromUrl(connectionString: string): string | null {
+  try {
+    const value = new URL(connectionString).searchParams.get("sslmode");
+    return value ? value.toLowerCase() : null;
+  } catch {
+    const m = /[?&]sslmode=([^&]+)/i.exec(connectionString);
+    return m ? decodeURIComponent(m[1]).toLowerCase() : null;
+  }
 }
 
 /**
@@ -41,7 +91,10 @@ export class Database {
   private migrated = false;
 
   constructor(config: DatabaseConfig) {
-    this.pool = new Pool({ connectionString: config.connectionString });
+    this.pool = new Pool({
+      connectionString: config.connectionString,
+      ...sslOption(config.connectionString, config.ssl),
+    });
     this.autoMigrate = config.autoMigrate ?? true;
     // A pool-level error handler prevents an idle client error from crashing
     // the process (plan: recover from service restarts / graceful degradation).
@@ -99,7 +152,22 @@ export class Database {
   async migrate(): Promise<void> {
     if (!this.autoMigrate || this.migrated) return;
     const sql = await readFile(INIT_SQL_PATH, "utf8");
-    await this.pool.query(sql);
+    // Serialize migrations across instances with a session advisory lock so two
+    // booting replicas don't run concurrent CREATE TABLE/INDEX (which can raise
+    // transient duplicate/"tuple concurrently updated" errors and wrongly demote
+    // a replica to in-memory). The lock auto-releases when the client returns.
+    const MIGRATION_LOCK_KEY = 0x7058_4f46; // "pXOF" — arbitrary fixed constant
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK_KEY]);
+      try {
+        await client.query(sql);
+      } finally {
+        await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]);
+      }
+    } finally {
+      client.release();
+    }
     this.migrated = true;
   }
 

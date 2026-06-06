@@ -139,6 +139,8 @@ working (plan Principle 4: integrations are optional). Copy `.env.example` to `.
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `2567` | Server port (REST + Colyseus ws). |
+| `AWAY_TIMEOUT_MS` | `90000` | Idle ms before a session auto-flips to `AWAY` (source `AUTO`); any C2S message clears it. |
+| `LOG_LEVEL` | `info` | Server log verbosity: `debug` / `info` / `warn` / `error`. |
 | `JWT_SECRET` | ephemeral | App JWT signing secret. Unset → random per-process secret (tokens reset on restart) + boot warning. Set in production. |
 | `JWT_EXPIRES_IN` | `12h` | Token lifetime (jsonwebtoken format). |
 | `AUTH_REQUIRED` | `false` | When `true`, a valid JWT is required to join the room **and** an admin JWT is required for admin REST writes. |
@@ -149,7 +151,10 @@ working (plan Principle 4: integrations are optional). Copy `.env.example` to `.
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | _(unset)_ | Enable Google OAuth (both + redirect base required). |
 | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | _(unset)_ | Enable Microsoft OAuth (both + redirect base required). |
 | `MS_TENANT` | `common` | Azure AD tenant id, or `common` / `organizations` / `consumers`. |
-| `GREYTHR_BASE_URL` / `GREYTHR_API_TOKEN` | _(unset)_ | Enable the real GreytHR adapter (both required); else the in-memory mock. |
+| `GREYTHR_BASE_URL` | _(unset)_ | Company-domain base, e.g. `https://kalvium.greythr.com`. Required to enable the real adapter. |
+| `GREYTHR_API_USER` / `GREYTHR_API_KEY` | _(unset)_ | API user + key (preferred); the adapter acquires & auto-refreshes an OAuth2 token. |
+| `GREYTHR_API_TOKEN` | _(unset)_ | Legacy pre-acquired bearer token (used if no user/key); no auto-refresh. |
+| `GREYTHR_PORTAL_URL` | kalvium ESS home (when configured) | ESS deep link shown as "Open greytHR" in the widget; absent → link hidden. |
 | `GREYTHR_TIMEOUT_MS` | `5000` | Per-request GreytHR timeout. |
 | `DATABASE_URL` | _(unset)_ | Postgres user storage. Down → warn + in-memory fallback. |
 | `AUTO_MIGRATE` | `true` (when DB set) | Run `server/db/init.sql` on boot (idempotent). |
@@ -179,13 +184,49 @@ Flow: client → `GET /api/auth/:provider/login` (302 to the IdP) → IdP →
 With **no** providers configured the login/callback routes 404 and the dev card is shown —
 the office runs exactly as the MVP.
 
-### GreytHR (attendance, optional)
+### GreytHR (attendance, optional) — kalvium.greythr.com walkthrough
 
-Set `GREYTHR_BASE_URL` + `GREYTHR_API_TOKEN` to activate the real adapter; otherwise an
-in-memory mock is used. The HUD shows an Attendance widget with explicit **Check in** /
-**Check out** buttons (it self-hides when HR is absent). Per the plan's GreytHR rules,
-attendance is **always** an explicit user click — there is no auto-check-in/out/logout and
-no activity tracking. A dead GreytHR config degrades gracefully (the office is unaffected).
+The HUD shows an Attendance widget with explicit **Check in** / **Check out** buttons (it
+self-hides when HR is absent). Per the plan's GreytHR rules, **attendance is always an
+explicit user click** — there is no auto-check-in/out/logout and no activity tracking. With
+**no** GreytHR credentials the in-memory **mock adapter keeps working** and the office runs
+exactly as the MVP; a dead/misconfigured GreytHR config degrades gracefully (the office is
+unaffected).
+
+The adapter targets greytHR's official API platform
+([api-docs.greythr.com](https://api-docs.greythr.com/),
+[readthedocs](https://greythr-api-docs.readthedocs.io/en/latest/authentication.html)):
+it `POST`s `{base}/uas/v1/oauth2/client-token` to obtain an OAuth2 access token (cached and
+refreshed before expiry, with a one-shot refresh-and-retry on a `401`), then calls the
+employee-lookup and attendance-swipe endpoints with the `Access-Token` and `x-greythr-domain`
+headers.
+
+**1. An admin creates an API user + key in greytHR.** In the live instance
+(`https://kalvium.greythr.com`), a greytHR **admin** opens **Settings (gear icon) → My
+Account → API Details**, adds an API user, and generates its key/credentials (the key is
+shown only once — copy it immediately). This produces the **API user** (client id) and **API
+key** (client secret) used below, scoped to the `kalvium.greythr.com` domain.
+
+**2. Set the env lines** (in `.env`):
+
+```bash
+GREYTHR_BASE_URL=https://kalvium.greythr.com
+GREYTHR_API_USER=Apiuser           # the API user created above
+GREYTHR_API_KEY=your-api-key       # the API key (client secret) — shown once
+# Optional: ESS deep link for the widget (defaults to this when configured):
+GREYTHR_PORTAL_URL=https://kalvium.greythr.com/v3/portal/ess/home
+# Optional legacy alternative to USER+KEY (no auto-refresh):
+# GREYTHR_API_TOKEN=your-pre-acquired-bearer-token
+```
+
+The `x-greythr-domain` header defaults to the host of `GREYTHR_BASE_URL`
+(`kalvium.greythr.com`). When configured, the widget shows an **"Open greytHR ↗"** link to the
+ESS portal home; when not configured the link is hidden and the mock adapter is used.
+
+> Note: exact greytHR request-body and swipe-envelope field names can vary by tenant/version.
+> Those tenant-specific shapes are isolated as clearly tagged constants/builders in
+> `server/src/integrations/hr/greythr.adapter.ts` (marked `VERIFY-WITH-DOCS`) so adjusting
+> them never touches business logic.
 
 ### Postgres + Redis (optional persistence, via Docker Compose)
 

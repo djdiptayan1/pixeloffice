@@ -65,9 +65,14 @@ let store: Store | null = null;
 let storeUnsubscribe: (() => void) | null = null;
 let adminMounted = false;
 let selfId = ""; // current sessionId; refreshed on every WELCOME
+let activeConn: Connection | null = null; // current Connection; closed on relogin
 
 async function start(opts: JoinSubmission): Promise<void> {
+  // A relogin (after going offline) builds a fresh Connection; close the old one
+  // so its retained handlers/room/client do not linger across cycles.
+  activeConn?.close();
   const conn = new Connection();
+  activeConn = conn;
 
   // Banner reflects every state change; login only returns when truly offline.
   conn.onState((state) => {
@@ -92,6 +97,13 @@ async function start(opts: JoinSubmission): Promise<void> {
   conn.onLeave(() => {
     toasts.show("Connection lost — reconnecting…", "broadcast");
   });
+
+  // Register the S2C bridge ONCE per Connection, here (not in boot). Connection
+  // retains + re-attaches handlers across its OWN reconnects, and a full
+  // offline->relogin builds a brand-new Connection that gets its own bridge.
+  // Handlers read the live game/store/selfId module refs, so they target the
+  // current session correctly after each WELCOME re-seed.
+  registerBridge(conn);
 
   try {
     await conn.connect(opts, opts.token);
@@ -172,22 +184,15 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   });
 
   login.hide();
-
-  // ----------------------------------------------------------------------
-  // S2C message bridge. Handlers are RETAINED by Connection and auto re-attached
-  // after a reconnect — register them ONCE (guarded below). They read the live
-  // `game`/`store`/`selfId` module refs so a reconnect rebind targets the new
-  // session correctly.
-  // ----------------------------------------------------------------------
-  registerBridge(conn);
 }
 
-let bridgeRegistered = false;
-
+// ----------------------------------------------------------------------
+// S2C message bridge. Registered once per Connection in start(). Handlers are
+// retained by Connection and auto re-attached after its own reconnects; they
+// read the live `game`/`store`/`selfId` module refs so a re-seed (each WELCOME)
+// targets the current session correctly.
+// ----------------------------------------------------------------------
 function registerBridge(conn: Connection): void {
-  if (bridgeRegistered) return;
-  bridgeRegistered = true;
-
   conn.on<PlayerJoinedPayload>(S2C.PLAYER_JOINED, ({ player }) => {
     if (!game || !store) return;
     store.upsertPlayer(player);
@@ -257,6 +262,7 @@ function teardownSession(): void {
   storeUnsubscribe = null;
   attendance?.destroy();
   attendance = null;
+  hud?.destroy();
   hud = null;
   if (game) {
     game.destroy();

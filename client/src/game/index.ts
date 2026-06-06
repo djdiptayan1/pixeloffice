@@ -94,7 +94,19 @@ function makeHandle(game: Phaser.Game, scene: OfficeScene): OfficeGameHandle {
       scene.setInputLocked(locked);
     },
     destroy() {
+      // Explicitly release the WebGL context. Phaser's WebGLRenderer.destroy()
+      // nulls its GL wrappers but never calls loseContext(), so the orphaned
+      // context only frees on (non-deterministic) GC. Browsers cap live WebGL
+      // contexts (~16 in Chrome); since we destroy+recreate the whole game on
+      // every reconnect, accumulating contexts can force-lose the live one and
+      // break rendering. Capture gl BEFORE destroy (which nulls renderer.gl).
+      const renderer = game.renderer as unknown as { gl?: WebGLRenderingContext | null };
+      const gl = renderer?.gl ?? null;
       game.destroy(true);
+      if (gl) {
+        const ext = gl.getExtension("WEBGL_lose_context");
+        ext?.loseContext();
+      }
     },
   };
 }

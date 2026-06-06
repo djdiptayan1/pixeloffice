@@ -42,11 +42,20 @@ describe("GoogleOAuthProvider", () => {
   it("exchanges a code -> normalized identity", async () => {
     const fetchImpl = fakeFetch({
       "oauth2.googleapis.com/token": { access_token: "AT" },
-      "userinfo": { sub: "g-123", email: "a@b.com", name: "Ada" },
+      "userinfo": { sub: "g-123", email: "a@b.com", email_verified: true, name: "Ada" },
     });
     const p = new GoogleOAuthProvider(base, fetchImpl);
     const id = await p.exchangeCode("the-code");
     expect(id).toEqual({ subject: "g-123", email: "a@b.com", name: "Ada" });
+  });
+
+  it("rejects an unverified Google email", async () => {
+    const fetchImpl = fakeFetch({
+      "oauth2.googleapis.com/token": { access_token: "AT" },
+      "userinfo": { sub: "g-123", email: "a@b.com", email_verified: false, name: "Ada" },
+    });
+    const p = new GoogleOAuthProvider(base, fetchImpl);
+    await expect(p.exchangeCode("c")).rejects.toThrow(/not verified/i);
   });
 
   it("throws when token exchange fails", async () => {
@@ -72,8 +81,32 @@ describe("MicrosoftOAuthProvider", () => {
       "oauth2/v2.0/token": { access_token: "AT" },
       "oidc/userinfo": { oid: "m-9", preferred_username: "user@org.com", name: "Mo" },
     });
-    const p = new MicrosoftOAuthProvider(base, fetchImpl);
+    const p = new MicrosoftOAuthProvider({ ...base, warn: () => {} }, fetchImpl);
     const id = await p.exchangeCode("c");
     expect(id).toEqual({ subject: "m-9", email: "user@org.com", name: "Mo" });
+  });
+
+  it("prefers the verified email claim over preferred_username", async () => {
+    const fetchImpl = fakeFetch({
+      "oauth2/v2.0/token": { access_token: "AT" },
+      "oidc/userinfo": {
+        oid: "m-9",
+        email: "real@org.com",
+        preferred_username: "login-hint@org.com",
+        name: "Mo",
+      },
+    });
+    const p = new MicrosoftOAuthProvider({ ...base, warn: () => {} }, fetchImpl);
+    const id = await p.exchangeCode("c");
+    expect(id.email).toBe("real@org.com");
+  });
+
+  it("rejects when neither email nor an email-shaped preferred_username is present", async () => {
+    const fetchImpl = fakeFetch({
+      "oauth2/v2.0/token": { access_token: "AT" },
+      "oidc/userinfo": { oid: "m-9", preferred_username: "not-an-email", name: "Mo" },
+    });
+    const p = new MicrosoftOAuthProvider({ ...base, warn: () => {} }, fetchImpl);
+    await expect(p.exchangeCode("c")).rejects.toThrow(/missing subject\/email/i);
   });
 });

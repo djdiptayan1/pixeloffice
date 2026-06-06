@@ -12,6 +12,16 @@
 // hides itself entirely. The office keeps working with no HR present.
 // ---------------------------------------------------------------------------
 
+import { readStoredToken } from "./login";
+
+/** Attach the OAuth bearer token when one exists so HR actions/status work under
+ *  AUTH_REQUIRED (requireAuth rejects token-less requests with 401). On the dev
+ *  path no token exists and the header is omitted. Mirrors admin.ts. */
+function authHeaders(base: Record<string, string> = {}): Record<string, string> {
+  const token = readStoredToken();
+  return token ? { ...base, Authorization: `Bearer ${token}` } : { ...base };
+}
+
 export interface MountAttendanceOptions {
   /** Base URL of the server REST API, e.g. "http://localhost:2567". */
   fetchBase: string;
@@ -26,6 +36,8 @@ type AttendanceStatus = "NOT_CHECKED_IN" | "CHECKED_IN" | "CHECKED_OUT";
 interface StatusResponse {
   status: AttendanceStatus;
   lastActionAtMs: number | null;
+  /** greytHR ESS portal deep link; present only when the real integration is on. */
+  portalUrl?: string;
 }
 
 interface ActionResponse {
@@ -99,7 +111,16 @@ export function mountAttendance(
   feedback.className = "attendance-feedback";
   feedback.setAttribute("aria-live", "polite");
 
-  root.append(title, statusRow, actions, feedback);
+  // "Open greytHR" deep link. Hidden until the server reports a portalUrl (i.e.
+  // the real GreytHR integration is configured); stays hidden on the mock path.
+  const portalLink = document.createElement("a");
+  portalLink.className = "attendance-portal-link";
+  portalLink.textContent = "Open greytHR ↗";
+  portalLink.target = "_blank";
+  portalLink.rel = "noopener noreferrer";
+  portalLink.hidden = true;
+
+  root.append(title, statusRow, actions, feedback, portalLink);
   container.appendChild(root);
 
   let current: AttendanceStatus = "NOT_CHECKED_IN";
@@ -136,6 +157,7 @@ export function mountAttendance(
     try {
       const res = await fetchFn(
         `${base}/api/hr/status?sessionId=${encodeURIComponent(sessionId)}`,
+        { headers: authHeaders() },
       );
       if (res.status === 404 || !res.ok) {
         // HR integration absent (or session unknown) -> hide; office unaffected.
@@ -144,6 +166,14 @@ export function mountAttendance(
       }
       const data = (await res.json()) as StatusResponse;
       current = data.status;
+      // Reveal the portal deep link only when the server supplies one.
+      if (data.portalUrl) {
+        portalLink.href = data.portalUrl;
+        portalLink.hidden = false;
+      } else {
+        portalLink.removeAttribute("href");
+        portalLink.hidden = true;
+      }
       root.hidden = false;
       render();
     } catch {
@@ -161,7 +191,7 @@ export function mountAttendance(
     try {
       const res = await fetchFn(`${base}/api/hr/${kind}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ sessionId }),
       });
       const data = (await res.json().catch(() => null)) as ActionResponse | null;

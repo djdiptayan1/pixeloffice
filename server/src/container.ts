@@ -60,16 +60,35 @@ const auth: AuthProvider = new JwtAuthProvider({
   defaultDepartment: authConfig.defaultDepartment,
 });
 
-// --- HR / GreytHR: real adapter only when both env vars are present ---------
-const hr: HrAdapter =
-  process.env.GREYTHR_BASE_URL && process.env.GREYTHR_API_TOKEN
-    ? new GreytHrAdapter({
-        baseUrl: process.env.GREYTHR_BASE_URL,
-        apiToken: process.env.GREYTHR_API_TOKEN,
-        timeoutMs: Number(process.env.GREYTHR_TIMEOUT_MS) || 5000,
-      })
-    : new MockGreytHrAdapter();
+// --- HR / GreytHR: real adapter only when env config is present -------------
+// Real adapter activates when GREYTHR_BASE_URL is set AND either an api-user +
+// api-key pair (preferred: the adapter acquires/refreshes its own token) or a
+// legacy pre-acquired GREYTHR_API_TOKEN is provided. Otherwise the in-memory
+// mock is used and the office still works (integrations are optional).
+const greytHrConfigured =
+  Boolean(process.env.GREYTHR_BASE_URL) &&
+  ((Boolean(process.env.GREYTHR_API_USER) && Boolean(process.env.GREYTHR_API_KEY)) ||
+    Boolean(process.env.GREYTHR_API_TOKEN));
+const hr: HrAdapter = greytHrConfigured
+  ? new GreytHrAdapter({
+      baseUrl: process.env.GREYTHR_BASE_URL!,
+      apiUser: process.env.GREYTHR_API_USER,
+      apiKey: process.env.GREYTHR_API_KEY,
+      apiToken: process.env.GREYTHR_API_TOKEN,
+      timeoutMs: Number(process.env.GREYTHR_TIMEOUT_MS) || 5000,
+    })
+  : new MockGreytHrAdapter();
 const attendance = new AttendanceService(hr);
+
+// greytHR ESS portal deep link surfaced in the attendance widget. Present ONLY
+// when the real integration is configured: GREYTHR_PORTAL_URL if set, else the
+// kalvium ESS home as a sensible default. Undefined on the mock/dev path so the
+// client hides the "Open greytHR" link.
+const DEFAULT_GREYTHR_PORTAL_URL =
+  "https://kalvium.greythr.com/v3/portal/ess/home";
+const hrPortalUrl: string | undefined = greytHrConfigured
+  ? process.env.GREYTHR_PORTAL_URL || DEFAULT_GREYTHR_PORTAL_URL
+  : undefined;
 
 // --- Persistence: defaults are in-memory; initContainer() may upgrade them --
 let users: UserRepository = new InMemoryUserRepository();
@@ -96,6 +115,10 @@ export const container = {
   /** HR adapter + attendance service (mock unless GreytHR env is set). */
   hr,
   attendance,
+  /** greytHR ESS portal deep link, or undefined when not configured. */
+  hrPortalUrl,
+  /** True when the REAL GreytHR adapter is active (vs the in-memory mock). */
+  hrConfigured: greytHrConfigured,
   registry,
 
   // Persistence — these getters return the live impls chosen by initContainer().

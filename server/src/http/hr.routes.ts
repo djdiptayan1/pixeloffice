@@ -58,8 +58,23 @@ export interface HrRouterDeps {
     jwt: JwtService;
     required: boolean;
   };
+  /**
+   * When true (the REAL GreytHR adapter is active), pass the acting user's email
+   * to the attendance service so it resolves the GreytHR employee CODE to swipe
+   * against (the office userId is NOT an employee code). With the mock adapter
+   * this is false: the mock ignores the id, and synthetic dev emails would not
+   * resolve to a seeded employee, so we keep the userId pass-through.
+   */
+  resolveEmployeeByEmail?: boolean;
   /** Injectable clock for tests; defaults to Date.now. */
   now?: () => number;
+  /**
+   * The greytHR ESS portal URL to surface in the attendance widget (an "Open
+   * greytHR" deep link). Present ONLY when the real GreytHR integration is
+   * configured; absent (undefined) on the mock/dev path so the client hides the
+   * link. Built by the integrator from GREYTHR_PORTAL_URL.
+   */
+  portalUrl?: string;
 }
 
 export function createHrRouter(deps: HrRouterDeps): Router {
@@ -81,7 +96,8 @@ export function createHrRouter(deps: HrRouterDeps): Router {
   router.post("/check-in", async (req: Request, res: Response) => {
     const user = resolveActingUser(req, res, deps, authRequired);
     if (!user) return;
-    const result = await deps.attendance.checkIn(user.userId, now());
+    const email = deps.resolveEmployeeByEmail ? user.email : undefined;
+    const result = await deps.attendance.checkIn(user.userId, now(), email);
     res.status(result.ok ? 200 : 502).json({
       ok: result.ok,
       status: result.status,
@@ -94,7 +110,8 @@ export function createHrRouter(deps: HrRouterDeps): Router {
   router.post("/check-out", async (req: Request, res: Response) => {
     const user = resolveActingUser(req, res, deps, authRequired);
     if (!user) return;
-    const result = await deps.attendance.checkOut(user.userId, now());
+    const email = deps.resolveEmployeeByEmail ? user.email : undefined;
+    const result = await deps.attendance.checkOut(user.userId, now(), email);
     res.status(result.ok ? 200 : 502).json({
       ok: result.ok,
       status: result.status,
@@ -115,6 +132,9 @@ export function createHrRouter(deps: HrRouterDeps): Router {
       userId: user.userId,
       status,
       lastActionAtMs: state.lastActionAtMs,
+      // Only present when the real GreytHR integration is configured; the widget
+      // renders an "Open greytHR" deep link iff this is present.
+      ...(deps.portalUrl ? { portalUrl: deps.portalUrl } : {}),
     });
   });
 

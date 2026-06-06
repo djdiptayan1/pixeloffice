@@ -187,6 +187,70 @@ describe("AttendanceService — adapter failure (graceful degradation)", () => {
   });
 });
 
+describe("AttendanceService — GreytHR employee-code resolution", () => {
+  /** Adapter that resolves a known email to an employee id and records swipes. */
+  class LookupAdapter implements HrAdapter {
+    swipes: string[] = [];
+    async lookupEmployee(email: string): Promise<EmployeeRecord | null> {
+      if (email.toLowerCase() === "ada@x.dev") {
+        return { id: "EMP-42", email, name: "Ada", department: "Engineering" };
+      }
+      return null;
+    }
+    async syncDepartments(): Promise<DepartmentMapping[]> {
+      return [];
+    }
+    async checkIn(employeeId: string, atMs: number): Promise<AttendanceResult> {
+      this.swipes.push(employeeId);
+      return { ok: true, recordedAtMs: atMs, status: "CHECKED_IN" };
+    }
+    async checkOut(employeeId: string, atMs: number): Promise<AttendanceResult> {
+      this.swipes.push(employeeId);
+      return { ok: true, recordedAtMs: atMs, status: "CHECKED_OUT" };
+    }
+  }
+
+  it("swipes the resolved EMPLOYEE id (not the office userId) when an email is supplied", async () => {
+    const adapter = new LookupAdapter();
+    const svc = new AttendanceService(adapter);
+    const r = await svc.checkIn("dev:ada:rand", T0, "ada@x.dev");
+    expect(r.ok).toBe(true);
+    expect(adapter.swipes).toEqual(["EMP-42"]); // employee code, NOT "dev:ada:rand"
+    // Local state stays keyed by the office userId.
+    expect(svc.getState("dev:ada:rand").status).toBe("CHECKED_IN");
+  });
+
+  it("caches the email->employee mapping (one lookup across calls)", async () => {
+    const adapter = new LookupAdapter();
+    let lookups = 0;
+    const orig = adapter.lookupEmployee.bind(adapter);
+    adapter.lookupEmployee = async (e: string) => {
+      lookups++;
+      return orig(e);
+    };
+    const svc = new AttendanceService(adapter);
+    await svc.checkIn("u", T0, "ada@x.dev");
+    await svc.checkOut("u", T1, "ada@x.dev");
+    expect(lookups).toBe(1);
+  });
+
+  it("returns {ok:false} without swiping when no employee is found", async () => {
+    const adapter = new LookupAdapter();
+    const svc = new AttendanceService(adapter);
+    const r = await svc.checkIn("u", T0, "unknown@x.dev");
+    expect(r.ok).toBe(false);
+    expect(adapter.swipes).toEqual([]);
+    expect(svc.getState("u").status).toBe("NOT_CHECKED_IN");
+  });
+
+  it("passes the userId through unchanged when NO email is supplied (mock/dev path)", async () => {
+    const adapter = new LookupAdapter();
+    const svc = new AttendanceService(adapter);
+    await svc.checkIn("emp_raw", T0);
+    expect(adapter.swipes).toEqual(["emp_raw"]);
+  });
+});
+
 describe("AttendanceService — forget", () => {
   it("resets a user to NOT_CHECKED_IN without emitting", async () => {
     const svc = new AttendanceService(new OkAdapter());

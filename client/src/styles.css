@@ -60,6 +60,16 @@ body {
   pointer-events: auto;
 }
 
+/* The HUD builds into its own layer (created/cleared per session) so toasts,
+   the connection banner, the admin console and the attendance widget — all
+   siblings under #hud-root — survive a HUD rebuild on reconnect. The layer
+   itself is click-transparent; its interactive descendants re-enable above. */
+.hud-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
 /* ----------------------------- Top bar ---------------------------------- */
 
 .hud-topbar {
@@ -861,4 +871,16 @@ body {
 
 .attendance-feedback[data-kind="error"] {
   color: #e5544b;
+}
+
+.attendance-portal-link {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.attendance-portal-link:hover {
+  text-decoration: underline;
 }

@@ -34,6 +34,24 @@ export interface AuthConfig {
   authRequired: boolean;
   /** Shared secret used for the OAuth state HMAC (JwtService's secret). */
   stateSecret: string;
+  /**
+   * Lower-cased email domains allowed to sign in via OAuth (from
+   * ALLOWED_EMAIL_DOMAINS). Empty = no domain restriction (any verified account
+   * may join — the zero-config / unset default). When set, the OAuth callback
+   * rejects an email whose domain is not in this set.
+   */
+  allowedEmailDomains: Set<string>;
+}
+
+/** Parse a comma-separated ALLOWED_EMAIL_DOMAINS list into a lower-cased set. */
+function parseAllowedDomains(raw: string | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!raw) return out;
+  for (const part of raw.split(",")) {
+    const d = part.trim().toLowerCase().replace(/^@/, "");
+    if (d) out.add(d);
+  }
+  return out;
 }
 
 function pickDepartment(raw: string | undefined): Department {
@@ -104,5 +122,6 @@ export function buildAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfi
     clientAppUrl: (env.CLIENT_APP_URL ?? DEFAULT_CLIENT_APP_URL).replace(/\/+$/, ""),
     authRequired: env.AUTH_REQUIRED === "true",
     stateSecret: jwt.secretForState(),
+    allowedEmailDomains: parseAllowedDomains(env.ALLOWED_EMAIL_DOMAINS),
   };
 }

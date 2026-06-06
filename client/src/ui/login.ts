@@ -26,12 +26,16 @@ const STORAGE_KEY = "pixeloffice.login";
 const TOKEN_KEY = "pixeloffice.token";
 
 /** Where to reach the auth REST API. Mirrors net/connection.ts derivation but
- *  kept local so login does not depend on the net layer. */
+ *  kept local so login does not depend on the net layer. In Vite dev the API is
+ *  on :2567; in any same-origin deployment (SERVE_CLIENT behind https) it shares
+ *  the page's host:port, so we must not hardcode :2567. */
 function serverHttpBase(): string {
-  const host = location.hostname || "localhost";
   const proto = location.protocol === "https:" ? "https" : "http";
-  // Default server port (shared DEFAULT_SERVER_PORT) — 2567.
-  return `${proto}://${host}:2567`;
+  const authority =
+    location.port === "5173"
+      ? `${location.hostname || "localhost"}:2567`
+      : location.host || `${location.hostname || "localhost"}:2567`;
+  return `${proto}://${authority}`;
 }
 
 /** Palette colors for each avatar swatch (matches the in-game avatar tints). */

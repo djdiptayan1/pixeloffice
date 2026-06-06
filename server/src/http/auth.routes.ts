@@ -34,6 +34,14 @@ function isProviderId(v: string): v is OAuthProviderId {
   return v === "google" || v === "microsoft";
 }
 
+/** True when no allowlist is configured, or the email's domain is allowed. */
+function emailDomainAllowed(email: string, allowed: Set<string>): boolean {
+  if (allowed.size === 0) return true; // no restriction configured
+  const at = email.lastIndexOf("@");
+  if (at === -1) return false;
+  return allowed.has(email.slice(at + 1).toLowerCase());
+}
+
 function pickDepartment(raw: unknown, fallback: Department): Department {
   return typeof raw === "string" && (DEPARTMENTS as readonly string[]).includes(raw)
     ? (raw as Department)
@@ -135,6 +143,14 @@ export function createAuthRouter(deps: AuthRouterDeps): Router {
       identity = await provider.exchangeCode(code);
     } catch {
       res.redirect(`${config.clientAppUrl}/#error=oauth_exchange_failed`);
+      return;
+    }
+
+    // Domain allowlist: when ALLOWED_EMAIL_DOMAINS is set, only verified emails
+    // in those domains may enter (a corporate office should not admit arbitrary
+    // external Google/Microsoft accounts). Unset = no restriction (dev default).
+    if (!emailDomainAllowed(identity.email, config.allowedEmailDomains)) {
+      res.redirect(`${config.clientAppUrl}/#error=domain_not_allowed`);
       return;
     }
 

@@ -33,6 +33,11 @@ RUN npm run build -w client
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+
+# tini as PID 1 so SIGTERM/SIGINT from `docker stop` / k8s reach the node
+# process and trigger installShutdown (drain ws clients, close db/redis). The
+# default node image entrypoint does not init-reap or forward signals.
+RUN apk add --no-cache tini
 # Serve the built client from Express by default in the container image.
 ENV SERVE_CLIENT=true
 ENV PORT=2567
@@ -57,4 +62,15 @@ EXPOSE 2567
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||2567)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
-CMD ["npm", "run", "start", "-w", "server"]
+# tini (PID 1) reaps zombies and forwards SIGTERM/SIGINT down the chain. We
+# invoke the tsx binary directly — the same entry as `npm run start -w server`
+# (→ `tsx src/index.ts`) but WITHOUT the npm wrapper, because npm-as-parent does
+# NOT forward SIGTERM to its child, so the graceful shutdown sequence in
+# lifecycle/shutdown.ts would never run under `docker stop` / k8s SIGTERM.
+# (`node --import tsx ...` is also wrong: it spawns a node child that likewise
+# never receives the signal. The tsx CLI, by contrast, forwards signals to its
+# node child — verified locally: SIGTERM → "[shutdown] clean shutdown complete".)
+# The binary is referenced explicitly since node_modules/.bin is not on PATH
+# outside an npm script. chain: tini -> tsx -> node (server/src/index.ts).
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node_modules/.bin/tsx", "server/src/index.ts"]

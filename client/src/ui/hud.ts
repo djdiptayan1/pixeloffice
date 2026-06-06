@@ -78,10 +78,19 @@ export interface HudCallbacks {
 export interface HudHandle {
   /** Render once from the current store snapshot (called on every change). */
   render(): void;
+  /** Tear down: remove the HUD DOM + its timer/global listeners. MUST be called
+   *  on reconnect/teardown or the 1s interval and document listener leak. */
+  destroy(): void;
 }
 
 export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): HudHandle {
-  parent.innerHTML = "";
+  // Build into our OWN layer (created + owned here), never clearing the shared
+  // overlay root — toasts, the connection banner, the admin console and the
+  // attendance widget are siblings under the same root and must survive a HUD
+  // rebuild on reconnect.
+  const layer = document.createElement("div");
+  layer.className = "hud-layer";
+  parent.appendChild(layer);
 
   // --- Top bar -------------------------------------------------------------
   const topBar = document.createElement("div");
@@ -121,9 +130,10 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   statusPill.addEventListener("click", () => {
     statusMenu.hidden = !statusMenu.hidden;
   });
-  document.addEventListener("click", (e) => {
+  const onDocClick = (e: MouseEvent): void => {
     if (!statusWrap.contains(e.target as Node)) statusMenu.hidden = true;
-  });
+  };
+  document.addEventListener("click", onDocClick);
   statusWrap.append(statusPill, statusMenu);
 
   // Join Meeting button (only visible when invited; agency rule)
@@ -173,6 +183,9 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
       const text = chatInput.value.trim();
       if (text) cb.onSendChat(text.slice(0, CHAT_MAX));
       chatInput.value = "";
+      // Hand control straight back to the game — keeping focus here left the
+      // movement lock on, so the avatar appeared frozen after every message.
+      chatInput.blur();
     } else if (e.key === "Escape") {
       chatInput.blur();
     }
@@ -181,7 +194,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   chatInput.addEventListener("blur", () => cb.onChatFocus?.(false));
   chatBar.appendChild(chatInput);
 
-  parent.append(topBar, sidebar, chatBar);
+  layer.append(topBar, sidebar, chatBar);
 
   // --- Rendering helpers ---------------------------------------------------
 
@@ -341,8 +354,15 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   }
 
   // Re-render once per second so event "time left" countdowns tick down.
-  window.setInterval(render, 1000);
+  const timerId = window.setInterval(render, 1000);
 
   render();
-  return { render };
+  return {
+    render,
+    destroy(): void {
+      window.clearInterval(timerId);
+      document.removeEventListener("click", onDocClick);
+      layer.remove();
+    },
+  };
 }

@@ -22,18 +22,39 @@ import {
   type JoinOptions,
 } from "@pixeloffice/shared";
 
-/** Derive the server WebSocket endpoint from the page location so the same
- *  build works on localhost and over a LAN IP (phones, other machines). */
+// The Vite dev server port (client/vite.config.ts server.port). When the page
+// is served from here the API/ws lives on a SEPARATE port (DEFAULT_SERVER_PORT).
+// In any other topology (SERVE_CLIENT single-container behind an https proxy on
+// 443, a LAN preview, etc.) the client is served from the SAME origin as the
+// server, so we must dial that same host:port — NOT a hardcoded :2567.
+const VITE_DEV_PORT = "5173";
+
+/** True when this page is being served by the Vite dev server (separate API). */
+function isViteDev(): boolean {
+  return location.port === VITE_DEV_PORT;
+}
+
+/** host[:port] to dial. In dev the API runs on DEFAULT_SERVER_PORT; otherwise
+ *  the client is same-origin with the server so we reuse the page's host. */
+function serverAuthority(): string {
+  const hostname = location.hostname || "localhost";
+  if (isViteDev()) return `${hostname}:${DEFAULT_SERVER_PORT}`;
+  // Same-origin: location.host already includes the port (or none for 80/443).
+  return location.host || `${hostname}:${DEFAULT_SERVER_PORT}`;
+}
+
+/** Derive the server HTTP base from the page location so the same build works
+ *  in dev (Vite on :5173 -> API on :2567), over a LAN IP, and in the
+ *  single-container same-origin (SERVE_CLIENT behind https) deployment. */
 export function serverHttpBase(): string {
-  const host = location.hostname || "localhost";
-  return `http://${host}:${DEFAULT_SERVER_PORT}`;
+  const proto = location.protocol === "https:" ? "https" : "http";
+  return `${proto}://${serverAuthority()}`;
 }
 
 function serverWsEndpoint(): string {
-  const host = location.hostname || "localhost";
   // Colyseus 0.15 expects the ws(s) endpoint of the server.
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${host}:${DEFAULT_SERVER_PORT}`;
+  return `${proto}://${serverAuthority()}`;
 }
 
 type MessageHandler<T> = (payload: T) => void;
@@ -61,9 +82,31 @@ export interface ConnectionReconnectOptions {
 const DEFAULT_BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_DELAY_MS = 15_000;
 
-// Colyseus 0.15 leave codes: 1000 = normal close (consented). >= 4000 are
-// app-defined. We treat a normal/consented close as "do not auto-reconnect".
+// Colyseus 0.15 leave codes. A *consented* close (the user left, or the server
+// gracefully disconnected the room) must NOT trigger auto-reconnect:
+//   - 4000 = CloseCode.CONSENTED (room.leave(true) AND server room.disconnect();
+//            graceful shutdown sends this — reconnecting would storm a server
+//            that just told everyone it is going away).
+//   - 1000 = a plain WS normal close.
+// 4010 = DEVMODE_RESTART is intentionally NOT consented: the dev server is
+// coming back, so we SHOULD reconnect. (colyseus.js does not re-export these
+// constants from its entrypoint, so we mirror them locally.)
 const NORMAL_CLOSE_CODE = 1000;
+const CONSENTED_CLOSE_CODE = 4000;
+
+/** Extract a (code, message) from a rejected joinOrCreate. colyseus.js rejects
+ *  with a ServerError ({ code, message }) for matchmake/auth rejections and a
+ *  plain Error for transport failures; normalise both for the error handler. */
+function describeJoinError(err: unknown): { code: number; message: string } {
+  if (err && typeof err === "object" && "code" in err) {
+    const e = err as { code?: unknown; message?: unknown };
+    return {
+      code: typeof e.code === "number" ? e.code : 0,
+      message: typeof e.message === "string" ? e.message : String(err),
+    };
+  }
+  return { code: 0, message: err instanceof Error ? err.message : String(err) };
+}
 
 export class Connection {
   private client: Client;
@@ -104,7 +147,18 @@ export class Connection {
     this.authToken = authToken;
     this.closedByUser = false;
     this.setState("connecting");
-    this.room = await this.client.joinOrCreate(ROOM_NAME, this.joinPayload());
+    const room = await this.client.joinOrCreate(ROOM_NAME, this.joinPayload());
+    // close() may have been called while the join was in flight; honour it
+    // instead of resurrecting a connection the caller already abandoned.
+    if (this.closedByUser) {
+      try {
+        room.leave(true);
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
+    this.room = room;
     this.attempt = 0;
     this.attachRoomLifecycle(this.room);
     this.setState("online");
@@ -192,7 +246,7 @@ export class Connection {
     room.onLeave((code: number) => {
       this.leaveHandler?.(code);
       this.room = null;
-      const consented = code === NORMAL_CLOSE_CODE;
+      const consented = code === CONSENTED_CLOSE_CODE || code === NORMAL_CLOSE_CODE;
       if (this.closedByUser || consented || !this.reconnectOpts.autoReconnect) {
         this.setState("offline");
         return;
@@ -223,12 +277,26 @@ export class Connection {
   private async tryReconnect(): Promise<void> {
     if (this.closedByUser || !this.joinOptions) return;
     try {
-      this.room = await this.client.joinOrCreate(ROOM_NAME, this.joinPayload());
+      const room = await this.client.joinOrCreate(ROOM_NAME, this.joinPayload());
+      // close() may have fired while the join awaited — do not resurrect it.
+      if (this.closedByUser) {
+        try {
+          room.leave(true);
+        } catch {
+          /* already gone */
+        }
+        return;
+      }
+      this.room = room;
       this.attempt = 0;
       this.attachRoomLifecycle(this.room);
       this.setState("online");
-    } catch {
-      // Still down — schedule the next attempt (state stays "reconnecting").
+    } catch (err) {
+      // Surface the failure (e.g. an expired/invalid auth token rejected by the
+      // server) so the UI can react instead of looping silently forever, then
+      // schedule the next attempt (state stays "reconnecting").
+      const { code, message } = describeJoinError(err);
+      this.errorHandler?.(code, message);
       this.scheduleReconnect();
     }
   }

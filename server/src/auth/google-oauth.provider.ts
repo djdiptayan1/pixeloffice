@@ -78,11 +78,18 @@ export class GoogleOAuthProvider implements OAuthProvider {
     const info = (await infoRes.json()) as {
       sub?: string;
       email?: string;
+      email_verified?: boolean | string;
       name?: string;
       given_name?: string;
     };
     if (!info.sub || !info.email) {
       throw new Error("Google userinfo missing sub/email");
+    }
+    // The email drives RBAC (admin) downstream, so it MUST be verified. Google's
+    // /v1/userinfo returns email_verified; some encodings send the boolean as a
+    // string ("true"). Reject anything not explicitly verified.
+    if (info.email_verified !== true && info.email_verified !== "true") {
+      throw new Error("Google userinfo email not verified");
     }
     return {
       subject: info.sub,

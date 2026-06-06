@@ -22,6 +22,7 @@ import { createLogger } from "../logging/logger";
 
 const log = createLogger("admin");
 
+const MAX_BROADCAST = 500;
 const DEFAULT_EVENT_MINUTES = 15;
 const DEFAULT_MEETING_DURATION = 30;
 const DEFAULT_MEETING_START = 0;
@@ -102,6 +103,11 @@ export function createAdminRouter(): Router {
     const message = typeof body.message === "string" ? body.message.trim() : "";
     if (message.length === 0) {
       res.status(400).json({ error: "message is required" });
+      return;
+    }
+    // Cap length before fanning out to every client (amplification guard).
+    if (message.length > MAX_BROADCAST) {
+      res.status(400).json({ error: "message too long" });
       return;
     }
     const room = container.registry.room;

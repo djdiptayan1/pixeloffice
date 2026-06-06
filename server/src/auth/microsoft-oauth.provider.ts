@@ -24,6 +24,12 @@ const DEFAULT_TENANT = "common";
 export interface MicrosoftConfig extends OAuthBaseConfig {
   /** Azure AD tenant id, or "common"/"organizations"/"consumers". */
   tenant?: string;
+  /** Optional logger seam (defaults to console.warn) — keeps tests quiet. */
+  warn?: (message: string) => void;
+}
+
+function looksLikeEmail(value: string | undefined): value is string {
+  return typeof value === "string" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value);
 }
 
 export class MicrosoftOAuthProvider implements OAuthProvider {
@@ -32,6 +38,7 @@ export class MicrosoftOAuthProvider implements OAuthProvider {
 
   private readonly redirectUri: string;
   private readonly tenant: string;
+  private readonly warn: (message: string) => void;
 
   constructor(
     private readonly config: MicrosoftConfig,
@@ -39,6 +46,7 @@ export class MicrosoftOAuthProvider implements OAuthProvider {
   ) {
     this.redirectUri = redirectUriFor("microsoft", config.redirectBase);
     this.tenant = config.tenant && config.tenant.length > 0 ? config.tenant : DEFAULT_TENANT;
+    this.warn = config.warn ?? ((m: string) => console.warn(m));
   }
 
   private authEndpoint(): string {
@@ -97,7 +105,20 @@ export class MicrosoftOAuthProvider implements OAuthProvider {
       name?: string;
     };
     const subject = info.sub || info.oid;
-    const email = info.email || info.preferred_username;
+    // `preferred_username` is a login HINT, not a verified email — Microsoft
+    // documents it as unsuitable for authorization/uniqueness. Prefer the
+    // verified `email` claim; only fall back to preferred_username when it looks
+    // like an email, and warn. The real authorization gate is the ALLOWED email
+    // domain allowlist + a pinned tenant (MS_TENANT) in auth.routes/config — do
+    // NOT default the tenant to "common" in production.
+    let email = info.email ?? null;
+    if (!email && looksLikeEmail(info.preferred_username)) {
+      this.warn(
+        "[PixelOffice] Microsoft userinfo had no verified email; falling back to " +
+          "preferred_username. Pin MS_TENANT and set ALLOWED_EMAIL_DOMAINS to gate access.",
+      );
+      email = info.preferred_username!;
+    }
     if (!subject || !email) {
       throw new Error("Microsoft userinfo missing subject/email");
     }

@@ -104,8 +104,9 @@ export class PresenceService extends EventEmitter {
     for (const rec of this.records.values()) {
       let meeting: MeetingInfo | null = null;
       try {
-        // Meetings target sessionIds (live identity); pass sessionId as the key.
-        meeting = this.calendar.getCurrentMeeting(rec.sessionId, nowMs);
+        // Meetings target the STABLE user identity (not the ephemeral
+        // sessionId) so a real calendar adapter is a drop-in replacement.
+        meeting = this.calendar.getCurrentMeeting(rec.userId, nowMs);
       } catch {
         meeting = null; // degrade gracefully
       }

@@ -3,10 +3,12 @@
 // it holds a plain array of meetings and answers the CalendarAdapter queries
 // from it. Admin REST seeds meetings via `createMeeting`.
 //
-// Identity note: meetings target sessionIds (the office's live identity). An
-// empty `participantIds` means "everyone in the office". The presence engine
-// queries per session, so the room passes a sessionId as the lookup id here.
-// The parameter is named `id` to make that explicit.
+// Identity note: meetings target STABLE user identities (identity.userId), NOT
+// Colyseus sessionIds — so a real GoogleCalendarAdapter (which keys events by
+// the authenticated user's account) is a drop-in replacement. An empty
+// `participantIds` means "everyone in the office". The presence engine queries
+// per session but passes that session's userId as the lookup id here. The
+// parameter is named `id` to make that explicit.
 // ---------------------------------------------------------------------------
 
 import type { MeetingInfo } from "@pixeloffice/shared";
@@ -31,12 +33,28 @@ export class MockCalendarAdapter implements CalendarAdapter {
   }
 
   getCurrentMeeting(id: string, nowMs: number): MeetingInfo | null {
+    // Deterministic tie-break when several meetings overlap (CONTRACT.md):
+    //   1. prefer a meeting the user is EXPLICITLY invited to over an
+    //      "everyone" meeting (specific invites must not be shadowed);
+    //   2. among ties, prefer the most-recently-started (max startTime).
+    // This mirrors how a real calendar surfaces the user's own event rather
+    // than the first one ever inserted.
+    let best: MeetingInfo | null = null;
+    let bestSpecific = false;
     for (const m of this.meetings) {
       if (m.startTime <= nowMs && nowMs < m.endTime && this.appliesTo(m, id)) {
-        return m;
+        const specific = m.participantIds.length > 0;
+        if (
+          best === null ||
+          (specific && !bestSpecific) ||
+          (specific === bestSpecific && m.startTime > best.startTime)
+        ) {
+          best = m;
+          bestSpecific = specific;
+        }
       }
     }
-    return null;
+    return best;
   }
 
   getUpcomingMeetings(id: string, nowMs: number): MeetingInfo[] {
@@ -52,6 +70,16 @@ export class MockCalendarAdapter implements CalendarAdapter {
 
   /** Admin REST entry point. Returns the created meeting. */
   createMeeting(input: CreateMeetingInput, nowMs: number): MeetingInfo {
+    // Validate at the adapter boundary so EVERY CalendarAdapter implementation
+    // enforces it: a zero/negative-duration meeting could never become active
+    // (now < endTime would be false), so reject it instead of silently
+    // consuming an id that never fires MEETING_STARTED.
+    if (!(input.durationMinutes > 0)) {
+      throw new Error("durationMinutes must be greater than 0");
+    }
+    if (!(input.startsInMinutes >= 0)) {
+      throw new Error("startsInMinutes must be >= 0");
+    }
     const participantIds = Array.isArray(input.participantIds) ? [...input.participantIds] : [];
     const startTime = nowMs + Math.round(input.startsInMinutes * 60_000);
     const endTime = startTime + Math.round(input.durationMinutes * 60_000);

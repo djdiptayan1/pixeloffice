@@ -10,9 +10,19 @@
 import type { MeetingInfo } from "@pixeloffice/shared";
 
 export interface CalendarAdapter {
-  /** The user's currently-active meeting, or null. `nowMs` supplied by caller. */
+  /**
+   * The user's currently-active meeting, or null. `nowMs` supplied by caller.
+   *
+   * IDENTITY: `userId` MUST be a STABLE user identity — `identity.userId` in the
+   * office (the IdP subject / dev slug), NOT a Colyseus sessionId (which changes
+   * on every reconnect). A real GoogleCalendarAdapter keys events by the
+   * authenticated user's account/email, so the seam must carry a stable id.
+   */
   getCurrentMeeting(userId: string, nowMs: number): MeetingInfo | null;
-  /** Upcoming (not yet started) meetings for the user, soonest first. */
+  /**
+   * Upcoming (not yet started) meetings for the user, soonest first.
+   * `userId` is the same stable identity as `getCurrentMeeting`.
+   */
   getUpcomingMeetings(userId: string, nowMs: number): MeetingInfo[];
 }
 
@@ -20,6 +30,9 @@ export interface CreateMeetingInput {
   title: string;
   startsInMinutes: number;
   durationMinutes: number;
-  /** sessionIds invited. Empty/omitted = everyone in the office. */
+  /**
+   * Stable user identities (identity.userId) invited. Empty/omitted = everyone
+   * in the office.
+   */
   participantIds?: string[];
 }

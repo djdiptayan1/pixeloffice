@@ -56,6 +56,10 @@ services:
     profiles: ["app"]
     build: . # requires a Dockerfile at the repo root
     container_name: pixeloffice-app
+    # Ensure SIGTERM reaches the node process on `docker compose down`/stop so the
+    # graceful shutdown drain runs. The image already uses tini as ENTRYPOINT;
+    # this is belt-and-suspenders for the compose path.
+    init: true
     depends_on:
       postgres:
         condition: service_healthy
