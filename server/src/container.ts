@@ -36,6 +36,9 @@ import type { HrAdapter } from "./integrations/hr/hr-adapter";
 import { MockGreytHrAdapter } from "./integrations/hr/mock-greythr.adapter";
 import { GreytHrAdapter } from "./integrations/hr/greythr.adapter";
 import { AttendanceService } from "./integrations/hr/attendance.service";
+import { HttpGreytHrEssClient } from "./integrations/greythr/greythr-ess.client";
+import { GreytHrAuthService } from "./auth/greythr/greythr-auth.service";
+import { buildGreytHrLoginConfig } from "./auth/greythr/greythr-auth.config";
 import {
   createUserRepository,
   createPresenceStore,
@@ -108,6 +111,28 @@ const auth: AuthProvider = new JwtAuthProvider({
   defaultDepartment: authConfig.defaultDepartment,
 });
 
+// --- greytHR ESS login (only when GREYTHR_LOGIN_ENABLED=true) ---------------
+const greytHrLoginConfig = buildGreytHrLoginConfig(process.env);
+// Read the repository through the live getter (it's set in initContainer).
+const usersProxy: UserRepository = {
+  save: (u) => container.users.save(u),
+  findById: (id) => container.users.findById(id),
+  all: () => container.users.all(),
+};
+const greytHrAuthService: GreytHrAuthService | null = greytHrLoginConfig
+  ? new GreytHrAuthService({
+      client: new HttpGreytHrEssClient({
+        baseUrl: greytHrLoginConfig.baseUrl,
+        timeoutMs: greytHrLoginConfig.timeoutMs,
+      }),
+      jwt: authConfig.jwt,
+      users: usersProxy,
+      adminEmails: authConfig.adminEmails,
+      defaultDepartment: authConfig.defaultDepartment,
+      allowedEmailDomains: authConfig.allowedEmailDomains,
+    })
+  : null;
+
 // --- HR / GreytHR: real adapter only when env config is present -------------
 // Real adapter activates when GREYTHR_BASE_URL is set AND either an api-user +
 // api-key pair (preferred: the adapter acquires/refreshes its own token) or a
@@ -168,6 +193,10 @@ export const container = {
   auth,
   /** Auth config (providers map, jwt service, RBAC, AUTH_REQUIRED gate). */
   authConfig,
+  /** greytHR ESS login service, or null when GREYTHR_LOGIN_ENABLED is not set. */
+  greytHrAuth: greytHrAuthService,
+  /** greytHR login config (null when disabled); carries the form subdomain. */
+  greytHrLoginConfig,
   /** HR adapter + attendance service (mock unless GreytHR env is set). */
   hr,
   attendance,

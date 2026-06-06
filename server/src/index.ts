@@ -13,6 +13,8 @@
 // zero-config `npm install && npm run dev` path is unchanged.
 // ---------------------------------------------------------------------------
 
+// Must be first: load .env before the container reads process.env.
+import "./load-env";
 import { createServer } from "node:http";
 import express from "express";
 import cors from "cors";
@@ -77,6 +79,15 @@ async function main(): Promise<void> {
     createAuthRouter({
       config: container.authConfig,
       users: container.users,
+      // greytHR login routes — present only when greytHR login is enabled.
+      ...(container.greytHrAuth && container.greytHrLoginConfig
+        ? {
+            greytHrLogin: {
+              service: container.greytHrAuth,
+              subdomain: container.greytHrLoginConfig.subdomain,
+            },
+          }
+        : {}),
       // Google Calendar connect flow — present only when Google OAuth creds are
       // set (else the calendar routes 404). Endpoint bases are env-overridable
       // so a local stub can stand in for Google.
