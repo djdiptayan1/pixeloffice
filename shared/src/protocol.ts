@@ -12,6 +12,7 @@ import type {
   PresenceSource,
   PresenceState,
   SocialEvent,
+  ActiveGame,
 } from "./types";
 
 export const ROOM_NAME = "office";
@@ -27,6 +28,11 @@ export const C2S = {
   LEAVE_EVENT: "leave-event",
   JOIN_MEETING: "join-meeting",
   LEAVE_MEETING: "leave-meeting",
+  JOIN_GAME: "join-game",
+  LEAVE_GAME: "leave-game",
+  GAME_INPUT: "game-input",
+  /** Edit own profile (name / department / avatar) from the profile modal. */
+  UPDATE_PROFILE: "update-profile",
 } as const;
 
 /** Options sent when joining the room (dev auth profile). */
@@ -61,6 +67,13 @@ export interface JoinMeetingPayload {
   meetingId: string;
 }
 
+/** Edit the sender's own profile; each field optional, only valid ones apply. */
+export interface UpdateProfilePayload {
+  name?: string;
+  department?: Department;
+  avatarId?: AvatarId;
+}
+
 // ---------------------------- server -> client ----------------------------
 
 export const S2C = {
@@ -77,6 +90,9 @@ export const S2C = {
   MEETING_STARTED: "meeting-started",
   MEETING_ENDED: "meeting-ended",
   TOAST: "toast",
+  GAME_UPDATE: "game-update",
+  /** A player changed their name / department / avatar (profile edit). */
+  PLAYER_UPDATED: "player-updated",
 } as const;
 
 export interface WelcomePayload {
@@ -95,6 +111,14 @@ export interface PlayerJoinedPayload {
 
 export interface PlayerLeftPayload {
   sessionId: string;
+}
+
+/** A player's display profile changed (name / department / avatar). */
+export interface PlayerUpdatedPayload {
+  sessionId: string;
+  name: string;
+  department: Department;
+  avatarId: AvatarId;
 }
 
 export interface PlayerMovedPayload {
@@ -149,3 +173,21 @@ export interface ToastPayload {
   message: string;
   kind: "info" | "event" | "meeting" | "broadcast";
 }
+
+export interface JoinGamePayload {
+  gameId: string;
+}
+
+export interface LeaveGamePayload {
+  gameId: string;
+}
+
+export interface GameInputPayload {
+  gameId: string;
+  input: any;
+}
+
+export interface GameUpdatePayload {
+  game: ActiveGame;
+}
+
