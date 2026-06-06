@@ -79,6 +79,9 @@ interface Avatar {
 export interface SceneCallbacks {
   onLocalMove(x: number, y: number, dir: Direction, moving: boolean): void;
   onAreaChange(areaName: string): void;
+  onInteractPrompt?(prompt: string | null, gameId?: string): void;
+  /** Local user double-clicked their own avatar (open the profile modal). */
+  onProfileOpen?(): void;
 }
 
 const BADGE_FOR: Record<PresenceState, string> = {
@@ -102,9 +105,13 @@ export class OfficeScene extends Phaser.Scene {
   /** While true the local avatar ignores keyboard (chat input focused). */
   private inputLocked = false;
   private lastArea = "Hallway";
+  /** Timestamp of the last pointerdown on the self avatar (double-click detect). */
+  private lastSelfClickAt = 0;
   /** Furniture pieces that flip between base/alt textures for a glow flicker. */
   private flickerPieces: { img: Phaser.GameObjects.Image; kind: FurnitureKind }[] = [];
   private flickerOn = false;
+  private keyE!: Phaser.Input.Keyboard.Key;
+  private currentPromptGameId?: string;
 
   constructor() {
     super({ key: "office" });
@@ -142,6 +149,7 @@ export class OfficeScene extends Phaser.Scene {
       left: kb.addKey(Phaser.Input.Keyboard.KeyCodes.A),
       right: kb.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
+    this.keyE = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
 
     // Announce initial area.
     this.reportArea(self);
@@ -152,6 +160,11 @@ export class OfficeScene extends Phaser.Scene {
 
   update(): void {
     if (this.inputLocked) return;
+
+    if (Phaser.Input.Keyboard.JustDown(this.keyE)) {
+      this.triggerInteraction();
+    }
+
     const self = this.avatars.get(this.selfId);
     if (!self || self.walking) return;
 
@@ -172,6 +185,12 @@ export class OfficeScene extends Phaser.Scene {
     }
 
     this.stepLocal(self, nx, ny, dir);
+  }
+
+  private triggerInteraction(): void {
+    if (this.currentPromptGameId) {
+      this.game.events.emit("lounge-game-interact", this.currentPromptGameId);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -301,6 +320,20 @@ export class OfficeScene extends Phaser.Scene {
     const sprite = this.add.sprite(px, py, TEX.avatarSheet(snap.avatarId));
     sprite.setOrigin(0.5, 0.75); // feet near the tile centre
     sprite.setFrame(frameIndex(poseDirFor(snap.dir)));
+
+    // Double-click the local avatar to open the profile modal.
+    if (isSelf) {
+      sprite.setInteractive({ useHandCursor: true });
+      sprite.on("pointerdown", () => {
+        const now = this.time.now;
+        if (now - this.lastSelfClickAt < 350) {
+          this.lastSelfClickAt = 0;
+          this.cb.onProfileOpen?.();
+        } else {
+          this.lastSelfClickAt = now;
+        }
+      });
+    }
 
     const nameTag = this.add.text(px, py - TILE * 0.95, isSelf ? `${snap.name} (you)` : snap.name, {
       fontFamily: "monospace",
@@ -439,6 +472,35 @@ export class OfficeScene extends Phaser.Scene {
       this.lastArea = name;
       this.cb.onAreaChange(name);
     }
+    this.checkGameProximity(a.snap.x, a.snap.y);
+  }
+
+  private checkGameProximity(x: number, y: number): void {
+    if (!this.cb.onInteractPrompt) return;
+
+    // Ping Pong: x: 38..40, y: 21..22
+    if (x >= 37 && x <= 41 && y >= 20 && y <= 23) {
+      this.currentPromptGameId = "lounge:ping-pong";
+      this.cb.onInteractPrompt("Press [E] to play Table Tennis", this.currentPromptGameId);
+      return;
+    }
+
+    // Arcade Cabinet: x: 35, y: 15
+    if (Math.abs(x - 35) <= 1 && Math.abs(y - 15) <= 1) {
+      this.currentPromptGameId = "lounge:connect-four";
+      this.cb.onInteractPrompt("Press [E] to play Connect Four", this.currentPromptGameId);
+      return;
+    }
+
+    // Chess Table: x: 45, y: 15
+    if (Math.abs(x - 45) <= 1 && Math.abs(y - 15) <= 1) {
+      this.currentPromptGameId = "lounge:tic-tac-toe";
+      this.cb.onInteractPrompt("Press [E] to play Tic-Tac-Toe", this.currentPromptGameId);
+      return;
+    }
+
+    this.currentPromptGameId = undefined;
+    this.cb.onInteractPrompt(null);
   }
 
   private tileOccupied(x: number, y: number): boolean {
@@ -593,5 +655,35 @@ export class OfficeScene extends Phaser.Scene {
       a.bubble = undefined;
       a.bubbleTimer = undefined;
     });
+  }
+
+  /** Apply a profile change (name / department / avatar) to a player avatar. */
+  apiUpdatePlayer(
+    sessionId: string,
+    profile: { name: string; department: PlayerSnapshot["department"]; avatarId: PlayerSnapshot["avatarId"] },
+  ): void {
+    const a = this.avatars.get(sessionId);
+    if (!a) return;
+    const isSelf = sessionId === this.selfId;
+    a.snap.name = profile.name;
+    a.snap.department = profile.department;
+    const avatarChanged = a.snap.avatarId !== profile.avatarId;
+    a.snap.avatarId = profile.avatarId;
+
+    a.nameTag.setText(isSelf ? `${profile.name} (you)` : profile.name);
+
+    if (avatarChanged) {
+      // Swap the avatar sheet and re-apply the current pose/animation.
+      a.sprite.anims.stop();
+      a.sprite.setTexture(TEX.avatarSheet(profile.avatarId));
+      a.sprite.setFrame(frameIndex(poseDirFor(a.snap.dir)));
+      if (a.walking) {
+        a.sprite.play(animKey(profile.avatarId, poseDirFor(a.snap.dir), "walk"), true);
+      } else {
+        this.applyPresenceAnim(a);
+      }
+    }
+    // Name width may have changed; reposition the name tag + presence badge.
+    this.moveTags(a);
   }
 }
