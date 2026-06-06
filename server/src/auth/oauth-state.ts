@@ -17,6 +17,13 @@ export interface StatePayload {
   nonce: string;
   /** Department the user picked on the login screen (carried through OAuth). */
   department?: string;
+  /**
+   * Stable user identity (identity.userId) initiating an INCREMENTAL grant (the
+   * Google Calendar connect flow). Carried signed through OAuth so the callback
+   * keys the resulting refresh token to the right user without trusting any
+   * client-supplied id. Absent for the sign-in flow.
+   */
+  userId?: string;
   /** Issued-at epoch ms. */
   iat: number;
 }
@@ -32,11 +39,12 @@ function sign(body: string, secret: string): string {
 /** Create a signed state string. */
 export function createState(
   secret: string,
-  opts: { department?: string; now?: number } = {},
+  opts: { department?: string; userId?: string; now?: number } = {},
 ): string {
   const payload: StatePayload = {
     nonce: randomBytes(12).toString("base64url"),
     department: opts.department,
+    userId: opts.userId,
     iat: opts.now ?? Date.now(),
   };
   const body = b64url(Buffer.from(JSON.stringify(payload), "utf8"));

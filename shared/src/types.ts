@@ -76,10 +76,18 @@ export interface MeetingInfo {
   title: string;
   startTime: number; // epoch ms
   endTime: number; // epoch ms
-  /** sessionIds invited. Empty array = everyone in the office. */
+  /** Stable user identities (identity.userId) invited. Empty array = everyone in the office. */
   participantIds: string[];
   /** "Meeting Room A" | "Meeting Room B" | "Meeting Room C" */
   roomName: string;
+  /**
+   * Video-call join link (e.g. a Google Meet URL) for this meeting, when the
+   * source calendar event carries one. OPTIONAL and backward-compatible: absent
+   * means there is no link to surface. The client renders a "Join" anchor that
+   * opens it in a NEW TAB only on an explicit user click (human-agency rule) —
+   * an avatar is never auto-teleported or auto-redirected.
+   */
+  meetLink?: string;
 }
 
 /** Display metadata for presence states (single source of truth for UI colors). */

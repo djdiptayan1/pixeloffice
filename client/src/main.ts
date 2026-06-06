@@ -43,6 +43,7 @@ import { Toasts } from "./ui/toasts";
 import { createAdmin } from "./ui/admin";
 import { mountConnectionBanner } from "./ui/connection-banner";
 import { mountAttendance, type AttendanceWidgetHandle } from "./ui/attendance";
+import { mountCalendarConnect, type CalendarConnectHandle } from "./ui/calendar-connect";
 
 const gameRoot = document.getElementById("game-root")!;
 const hudRoot = document.getElementById("hud-root")!;
@@ -50,6 +51,24 @@ const loginRoot = document.getElementById("login-root")!;
 
 const toasts = new Toasts(hudRoot);
 const banner = mountConnectionBanner(hudRoot);
+
+// Returning from the Google Calendar OAuth flow lands here with
+// `#calendar=connected` in the URL fragment (mirrors login.ts's #token handling,
+// but kept here so login.ts stays untouched). Strip the fragment immediately so
+// it never lingers in the address bar/history, then toast once the HUD exists.
+// Note: login.ts's consumeAuthFragment only acts on #token=/#error= and leaves
+// an unrelated #calendar= fragment intact, so this read is not racy.
+function consumeCalendarFragment(): boolean {
+  const hash = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
+  if (!hash) return false;
+  const params = new URLSearchParams(hash);
+  if (params.get("calendar") !== "connected") return false;
+  history.replaceState(null, "", location.pathname + location.search);
+  return true;
+}
+const returnedFromCalendarConnect = consumeCalendarFragment();
+// Guard so a reconnect re-boot does not re-toast the calendar-connected message.
+let calendarToastShown = false;
 
 const login = createLogin({
   parent: loginRoot,
@@ -61,6 +80,7 @@ const login = createLogin({
 let game: OfficeGameHandle | null = null;
 let hud: HudHandle | null = null;
 let attendance: AttendanceWidgetHandle | null = null;
+let calendarConnect: CalendarConnectHandle | null = null;
 let store: Store | null = null;
 let storeUnsubscribe: (() => void) | null = null;
 let adminMounted = false;
@@ -171,19 +191,39 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     createAdmin(hudRoot);
     adminMounted = true;
   }
+  const liveSessionId = (): string => {
+    try {
+      return conn.sessionId;
+    } catch {
+      return "";
+    }
+  };
+
   // Attendance widget self-hides if the HR integration is absent (status 404).
   attendance = mountAttendance(hudRoot, {
     fetchBase: serverHttpBase(),
-    getSessionId: () => {
-      try {
-        return conn.sessionId;
-      } catch {
-        return "";
-      }
-    },
+    getSessionId: liveSessionId,
+  });
+
+  // "Connect Google Calendar" widget self-hides if Google is not configured
+  // (status 404) — integrations are optional; the office is unaffected.
+  calendarConnect = mountCalendarConnect(hudRoot, {
+    fetchBase: serverHttpBase(),
+    getSessionId: liveSessionId,
   });
 
   login.hide();
+
+  // If we just returned from the calendar OAuth flow, confirm it once the HUD
+  // (and thus the toast surface) is live. Re-querying status reflects the new
+  // connected state without a manual refresh.
+  if (returnedFromCalendarConnect && !calendarToastShown) {
+    calendarToastShown = true;
+    toasts.show(
+      "Google Calendar connected — your meetings now drive your presence",
+      "meeting",
+    );
+  }
 }
 
 // ----------------------------------------------------------------------
@@ -262,6 +302,8 @@ function teardownSession(): void {
   storeUnsubscribe = null;
   attendance?.destroy();
   attendance = null;
+  calendarConnect?.destroy();
+  calendarConnect = null;
   hud?.destroy();
   hud = null;
   if (game) {

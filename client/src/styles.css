@@ -1269,6 +1269,121 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
+   "Open Meet" anchor — sits next to the Join Meeting button in the top bar. A
+   distinct external-call affordance (opens Meet in a new tab) themed to read as
+   secondary to the primary room-join button.
+--------------------------------------------------------------------------- */
+.hud-meet-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-decoration: none;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: transform 0.12s var(--ease), filter 0.15s ease, background 0.12s ease;
+}
+.hud-meet-link:hover {
+  background: var(--panel-3);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+}
+.hud-meet-link:active {
+  transform: translateY(0) scale(0.97);
+}
+
+/* ---------------------------------------------------------------------------
+   "Connect Google Calendar" widget — a compact row pinned above the attendance
+   card (bottom-left). Self-hides when Google is not configured. Reuses the panel
+   language so it sits consistently among the other HUD cards.
+--------------------------------------------------------------------------- */
+.calendar-connect {
+  position: absolute;
+  left: 12px;
+  /* Sits just above the attendance widget (which is at bottom: 64px). */
+  bottom: 184px;
+  width: 264px;
+  background: linear-gradient(180deg, rgba(26, 33, 43, 0.94), rgba(20, 26, 34, 0.94));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 10px 12px;
+}
+
+.calendar-connect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.calendar-connect-icon {
+  flex: 0 0 auto;
+}
+
+.calendar-connect-label {
+  flex: 1 1 auto;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.calendar-connect-label.is-connected {
+  color: var(--accent);
+}
+
+.calendar-connect-btn,
+.calendar-disconnect-btn {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 6px;
+  transition: background 0.12s ease, transform 0.1s var(--ease), border-color 0.12s ease;
+}
+
+.calendar-connect-btn {
+  border: 1px solid color-mix(in srgb, var(--accent-2) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent-2) 18%, var(--panel-2));
+  color: var(--text);
+}
+.calendar-connect-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-2) 28%, var(--panel-2));
+  transform: translateY(-1px);
+}
+.calendar-connect-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+}
+
+.calendar-disconnect-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+}
+.calendar-disconnect-btn:hover:not(:disabled) {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.calendar-connect-btn:disabled,
+.calendar-disconnect-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------------------
    Reduced motion: honor the user's OS preference — strip all non-essential
    animation/transition while keeping the layout and final states intact.
 --------------------------------------------------------------------------- */

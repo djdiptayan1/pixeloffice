@@ -26,15 +26,17 @@ const STORAGE_KEY = "pixeloffice.login";
 const TOKEN_KEY = "pixeloffice.token";
 
 /** Where to reach the auth REST API. Mirrors net/connection.ts derivation but
- *  kept local so login does not depend on the net layer. In Vite dev the API is
- *  on :2567; in any same-origin deployment (SERVE_CLIENT behind https) it shares
- *  the page's host:port, so we must not hardcode :2567. */
+ *  kept local so login does not depend on the net layer. When the page is served
+ *  by Vite (dev :5173 OR preview :4173) the API/ws lives on a SEPARATE port
+ *  (:2567); in any same-origin deployment (SERVE_CLIENT behind https) it shares
+ *  the page's host:port, so we must not hardcode :2567. Keep this port set in
+ *  sync with net/connection.ts's SEPARATE_API_PORTS. */
+const SEPARATE_API_PORTS = new Set(["5173", "4173"]);
 function serverHttpBase(): string {
   const proto = location.protocol === "https:" ? "https" : "http";
-  const authority =
-    location.port === "5173"
-      ? `${location.hostname || "localhost"}:2567`
-      : location.host || `${location.hostname || "localhost"}:2567`;
+  const authority = SEPARATE_API_PORTS.has(location.port)
+    ? `${location.hostname || "localhost"}:2567`
+    : location.host || `${location.hostname || "localhost"}:2567`;
   return `${proto}://${authority}`;
 }
 

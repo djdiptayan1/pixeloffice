@@ -77,6 +77,28 @@ async function main(): Promise<void> {
     createAuthRouter({
       config: container.authConfig,
       users: container.users,
+      // Google Calendar connect flow — present only when Google OAuth creds are
+      // set (else the calendar routes 404). Endpoint bases are env-overridable
+      // so a local stub can stand in for Google.
+      ...(container.googleCalConfigured
+        ? {
+            googleCalendar: {
+              clientId: process.env.GOOGLE_CLIENT_ID!.trim(),
+              clientSecret: process.env.GOOGLE_CLIENT_SECRET!.trim(),
+              redirectBase: (process.env.OAUTH_REDIRECT_BASE ?? `http://localhost:${PORT}`).trim(),
+              authBase: process.env.GOOGLE_AUTH_BASE ?? "https://accounts.google.com",
+              tokenBase: process.env.GOOGLE_TOKEN_BASE ?? "https://oauth2.googleapis.com",
+              tokens: container.googleTokenStore,
+              resolveSessionUserId(sessionId: string): string | null {
+                const room = container.registry.room;
+                if (!room) return null;
+                const p = room.listPlayers().find((pl) => pl.sessionId === sessionId);
+                if (!p || p.isNpc) return null; // NPCs never connect a calendar
+                return p.userId;
+              },
+            },
+          }
+        : {}),
     }),
   );
 
@@ -175,6 +197,11 @@ async function main(): Promise<void> {
     closables: [
       ...(container.database ? [container.database] : []),
       ...(container.redis ? [container.redis] : []),
+      // Stop the Google Calendar background poll loop on shutdown (no-op when
+      // unconfigured). Wrap stop() as the closable close() contract.
+      ...(container.googleCalendar
+        ? [{ close: () => container.googleCalendar!.stop() }]
+        : []),
     ],
   });
 }

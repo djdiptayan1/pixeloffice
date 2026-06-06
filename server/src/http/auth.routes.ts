@@ -24,10 +24,42 @@ import { roleForEmail } from "../auth/rbac";
 import { createState, verifyState } from "../auth/oauth-state";
 import { bearerToken } from "../auth/middleware";
 import type { OAuthProviderId } from "../auth/oauth-provider";
+import type { GoogleTokenStore } from "../auth/google-token.store";
+import type { FetchLike } from "../auth/oauth-provider";
+
+/**
+ * Optional Google Calendar connect deps. Present ONLY when GOOGLE_CLIENT_ID +
+ * GOOGLE_CLIENT_SECRET are set; absent on the zero-config dev path so the
+ * /api/auth/google/calendar/* routes 404 cleanly (integrations are optional).
+ *
+ * Endpoint bases are env-overridable so a local stub can stand in for Google.
+ */
+export interface GoogleCalendarConnectDeps {
+  clientId: string;
+  clientSecret: string;
+  /** `${redirectBase}/api/auth/google/calendar/callback` is the registered URI. */
+  redirectBase: string;
+  /** Override https://accounts.google.com (GOOGLE_AUTH_BASE). */
+  authBase: string;
+  /** Override https://oauth2.googleapis.com (GOOGLE_TOKEN_BASE). */
+  tokenBase: string;
+  /** Refresh-token store keyed by stable identity.userId. */
+  tokens: GoogleTokenStore;
+  /**
+   * Resolve a live Colyseus sessionId to its stable userId, exactly like the HR
+   * routes do (via the OfficeRoom player list). Returns null for unknown/offline
+   * sessions and for NPCs (NPCs can never connect a calendar).
+   */
+  resolveSessionUserId(sessionId: string): string | null;
+  /** Injectable fetch for tests (token exchange). Defaults to global fetch. */
+  fetchImpl?: FetchLike;
+}
 
 export interface AuthRouterDeps {
   config: AuthConfig;
   users: UserRepository;
+  /** Present only when Google Calendar is configured (else routes 404). */
+  googleCalendar?: GoogleCalendarConnectDeps;
 }
 
 function isProviderId(v: string): v is OAuthProviderId {
@@ -57,9 +89,18 @@ function avatarForSubject(subject: string): AvatarId {
   return AVATAR_IDS[hash % AVATAR_IDS.length];
 }
 
+const CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly";
+
 export function createAuthRouter(deps: AuthRouterDeps): Router {
   const router = Router();
   const { config, users } = deps;
+
+  // --- Google Calendar incremental-grant connect flow --------------------
+  // Only mounted when Google Calendar is configured; otherwise these paths fall
+  // through to the router's default 404 (integrations optional).
+  if (deps.googleCalendar) {
+    mountGoogleCalendarRoutes(router, config, deps.googleCalendar);
+  }
 
   // GET /api/auth/config --------------------------------------------------
   router.get("/config", (_req: Request, res: Response) => {
@@ -180,4 +221,130 @@ export function createAuthRouter(deps: AuthRouterDeps): Router {
   });
 
   return router;
+}
+
+/**
+ * Mount the Google Calendar incremental-authorization flow:
+ *   GET  /google/calendar/connect?sessionId=  -> 302 to Google consent (offline)
+ *   GET  /google/calendar/callback            -> exchange code, store refresh token
+ *   GET  /google/calendar/status?sessionId=   -> { connected: boolean }
+ *   POST /google/calendar/disconnect          -> delete the stored grant
+ *
+ * Identity is resolved server-side from the LIVE Colyseus sessionId (mirroring
+ * the HR routes) and carried SIGNED through OAuth state — never trusted from the
+ * client. NPCs are rejected (resolveSessionUserId returns null for them).
+ */
+function mountGoogleCalendarRoutes(
+  router: Router,
+  config: AuthConfig,
+  gc: GoogleCalendarConnectDeps,
+): void {
+  const fetchImpl: FetchLike =
+    gc.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+  const redirectUri = `${gc.redirectBase.replace(/\/+$/, "")}/api/auth/google/calendar/callback`;
+
+  function resolveUserId(req: Request): string | null {
+    const raw =
+      (typeof req.query.sessionId === "string" && req.query.sessionId) ||
+      (typeof (req.body as Record<string, unknown> | undefined)?.sessionId === "string"
+        ? ((req.body as Record<string, unknown>).sessionId as string)
+        : "");
+    if (!raw) return null;
+    return gc.resolveSessionUserId(raw);
+  }
+
+  // GET /api/auth/google/calendar/connect?sessionId= ----------------------
+  router.get("/google/calendar/connect", (req: Request, res: Response) => {
+    const userId = resolveUserId(req);
+    if (!userId) {
+      res.status(400).json({ error: "Unknown or missing session" });
+      return;
+    }
+    const state = createState(config.stateSecret, { userId });
+    const params = new URLSearchParams({
+      client_id: gc.clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: CAL_SCOPE,
+      state,
+      access_type: "offline",
+      prompt: "consent",
+      include_granted_scopes: "true",
+    });
+    res.redirect(`${gc.authBase.replace(/\/+$/, "")}/o/oauth2/v2/auth?${params.toString()}`);
+  });
+
+  // GET /api/auth/google/calendar/callback --------------------------------
+  router.get("/google/calendar/callback", async (req: Request, res: Response) => {
+    const error = typeof req.query.error === "string" ? req.query.error : null;
+    if (error) {
+      res.redirect(`${config.clientAppUrl}/#calendar=error`);
+      return;
+    }
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const stateRaw = typeof req.query.state === "string" ? req.query.state : "";
+    if (!code) {
+      res.status(400).json({ error: "Missing authorization code" });
+      return;
+    }
+    const state = verifyState(stateRaw, config.stateSecret);
+    if (!state || !state.userId) {
+      res.status(400).json({ error: "Invalid or expired state" });
+      return;
+    }
+
+    try {
+      const tokenRes = await fetchImpl(`${gc.tokenBase.replace(/\/+$/, "")}/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: gc.clientId,
+          client_secret: gc.clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+        }).toString(),
+      });
+      if (!tokenRes.ok) throw new Error(`token exchange failed (${tokenRes.status})`);
+      const body = (await tokenRes.json()) as {
+        refresh_token?: string;
+        scope?: string;
+      };
+      if (!body.refresh_token) {
+        // No refresh token (user previously consented without prompt=consent, or
+        // revoked). Surface as an error so the client can retry the connect.
+        throw new Error("no refresh_token returned");
+      }
+      await gc.tokens.save(state.userId, {
+        refreshToken: body.refresh_token,
+        scope: body.scope,
+        connectedAtMs: Date.now(),
+      });
+      res.redirect(`${config.clientAppUrl}/#calendar=connected`);
+    } catch {
+      res.redirect(`${config.clientAppUrl}/#calendar=error`);
+    }
+  });
+
+  // GET /api/auth/google/calendar/status?sessionId= -----------------------
+  router.get("/google/calendar/status", async (req: Request, res: Response) => {
+    const userId = resolveUserId(req);
+    if (!userId) {
+      res.status(400).json({ error: "Unknown or missing session" });
+      return;
+    }
+    const record = await gc.tokens.get(userId);
+    res.json({ connected: Boolean(record) });
+  });
+
+  // POST /api/auth/google/calendar/disconnect -----------------------------
+  router.post("/google/calendar/disconnect", async (req: Request, res: Response) => {
+    const userId = resolveUserId(req);
+    if (!userId) {
+      res.status(400).json({ error: "Unknown or missing session" });
+      return;
+    }
+    await gc.tokens.delete(userId);
+    res.json({ connected: false });
+  });
 }

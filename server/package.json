@@ -6,7 +6,9 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "test": "vitest run",
-    "smoke": "tsx src/scripts/smoke.ts"
+    "smoke": "tsx src/scripts/smoke.ts",
+    "google-stub": "tsx src/scripts/google-stub.ts",
+    "smoke:calendar": "tsx src/scripts/calendar-smoke.ts"
   },
   "dependencies": {
     "colyseus": "^0.15.17",

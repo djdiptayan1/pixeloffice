@@ -24,6 +24,12 @@ import { JwtAuthProvider } from "./auth/jwt-auth.provider";
 import { InMemoryUserRepository, type UserRepository } from "./repositories/user.repository";
 import { MockCalendarAdapter } from "./integrations/calendar/mock-calendar.adapter";
 import type { CalendarAdapter } from "./integrations/calendar/calendar-adapter";
+import { GoogleCalendarAdapter } from "./integrations/calendar/google-calendar.adapter";
+import { CompositeCalendarAdapter } from "./integrations/calendar/composite-calendar.adapter";
+import {
+  InMemoryGoogleTokenStore,
+  type GoogleTokenStore,
+} from "./auth/google-token.store";
 import { EventService } from "./events/event.service";
 import { PresenceService } from "./presence/presence.service";
 import type { HrAdapter } from "./integrations/hr/hr-adapter";
@@ -46,7 +52,39 @@ import type { OfficeRoom } from "./rooms/office.room";
 
 // --- Synchronous, framework-free services (shared by REST + room) ----------
 const mockCalendar = new MockCalendarAdapter();
-const calendar: CalendarAdapter = mockCalendar;
+
+// --- Google Calendar: real adapter only when OAuth creds are present --------
+// Mirrors the GreytHR env-gate. When GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET are
+// set, we construct a per-user refresh-token store + GoogleCalendarAdapter and
+// OVERLAY it on the mock via a dumb CompositeCalendarAdapter (admin-scheduled
+// dev meetings still work AND real Google meetings drive presence). With no env
+// the calendar stays the pure mock — the zero-config path is untouched.
+//
+// Endpoint bases are env-overridable so a local stub can stand in for Google.
+const googleCalConfigured =
+  Boolean(process.env.GOOGLE_CLIENT_ID?.trim()) &&
+  Boolean(process.env.GOOGLE_CLIENT_SECRET?.trim());
+
+const googleTokenStore: GoogleTokenStore = new InMemoryGoogleTokenStore();
+
+const googleCalendar: GoogleCalendarAdapter | null = googleCalConfigured
+  ? new GoogleCalendarAdapter(
+      {
+        clientId: process.env.GOOGLE_CLIENT_ID!.trim(),
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET!.trim(),
+        tokenBase: process.env.GOOGLE_TOKEN_BASE,
+        apiBase: process.env.GOOGLE_API_BASE,
+        pollIntervalMs: Number(process.env.GOOGLE_CAL_POLL_MS) || undefined,
+        // GOOGLE_CAL_TITLES=false => read busy/free only, display "Busy".
+        includeTitles: process.env.GOOGLE_CAL_TITLES !== "false",
+      },
+      googleTokenStore,
+    )
+  : null;
+
+const calendar: CalendarAdapter = googleCalendar
+  ? new CompositeCalendarAdapter(googleCalendar, mockCalendar)
+  : mockCalendar;
 const events = new EventService();
 const presence = new PresenceService(calendar, events);
 
@@ -117,6 +155,12 @@ export const container = {
   mockCalendar,
   /** Interface view of the calendar (what services depend on). */
   calendar,
+  /** Per-user Google Calendar refresh-token store (connect flow + adapter). */
+  googleTokenStore,
+  /** Live Google Calendar adapter (background poll loop), or null when unconfigured. */
+  googleCalendar,
+  /** True when the real Google Calendar integration is active. */
+  googleCalConfigured,
   events,
   presence,
   /** Ambient office NPCs (framework-free; the room wires effects to the wire). */
@@ -165,6 +209,10 @@ export async function initContainer(
 ): Promise<void> {
   if (initialized) return;
   initialized = true;
+
+  // Start the Google Calendar background poll loop (no-op when unconfigured).
+  // The adapter owns its own interval; the room tick stays untouched.
+  googleCalendar?.start();
 
   const userResult = await createUserRepository(env);
   users = userResult.repository;

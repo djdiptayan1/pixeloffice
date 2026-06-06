@@ -17,22 +17,39 @@ import {
   type OAuthProvider,
 } from "./oauth-provider";
 
-const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo";
+// Endpoint bases are env-overridable so a local stub can stand in for Google
+// (the same overrides the Calendar integration uses). Defaults are the real
+// Google endpoints; the userinfo host derives from GOOGLE_API_BASE's domain.
+const DEFAULT_AUTH_BASE = "https://accounts.google.com";
+const DEFAULT_TOKEN_BASE = "https://oauth2.googleapis.com";
+const DEFAULT_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo";
 const SCOPE = "openid email profile";
+
+function trimBase(v: string | undefined, fallback: string): string {
+  return (v && v.trim() ? v.trim() : fallback).replace(/\/+$/, "");
+}
 
 export class GoogleOAuthProvider implements OAuthProvider {
   readonly id = "google" as const;
   readonly label = "Google";
 
   private readonly redirectUri: string;
+  private readonly authEndpoint: string;
+  private readonly tokenEndpoint: string;
+  private readonly userinfoEndpoint: string;
 
   constructor(
     private readonly config: OAuthBaseConfig,
     private readonly fetchImpl: FetchLike = globalThis.fetch as unknown as FetchLike,
+    env: NodeJS.ProcessEnv = process.env,
   ) {
     this.redirectUri = redirectUriFor("google", config.redirectBase);
+    this.authEndpoint = `${trimBase(env.GOOGLE_AUTH_BASE, DEFAULT_AUTH_BASE)}/o/oauth2/v2/auth`;
+    this.tokenEndpoint = `${trimBase(env.GOOGLE_TOKEN_BASE, DEFAULT_TOKEN_BASE)}/token`;
+    // userinfo lives under the API host; override via GOOGLE_API_BASE when stubbed.
+    this.userinfoEndpoint = env.GOOGLE_API_BASE?.trim()
+      ? `${trimBase(env.GOOGLE_API_BASE, "")}/oauth2/v3/userinfo`
+      : DEFAULT_USERINFO_ENDPOINT;
   }
 
   authorizationUrl(state: string): string {
@@ -45,11 +62,11 @@ export class GoogleOAuthProvider implements OAuthProvider {
       access_type: "online",
       prompt: "select_account",
     });
-    return `${AUTH_ENDPOINT}?${params.toString()}`;
+    return `${this.authEndpoint}?${params.toString()}`;
   }
 
   async exchangeCode(code: string): Promise<OAuthIdentity> {
-    const tokenRes = await this.fetchImpl(TOKEN_ENDPOINT, {
+    const tokenRes = await this.fetchImpl(this.tokenEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -68,7 +85,7 @@ export class GoogleOAuthProvider implements OAuthProvider {
       throw new Error("Google token exchange returned no access_token");
     }
 
-    const infoRes = await this.fetchImpl(USERINFO_ENDPOINT, {
+    const infoRes = await this.fetchImpl(this.userinfoEndpoint, {
       method: "GET",
       headers: { Authorization: `Bearer ${token.access_token}` },
     });

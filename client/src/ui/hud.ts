@@ -136,13 +136,25 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   document.addEventListener("click", onDocClick);
   statusWrap.append(statusPill, statusMenu);
 
-  // Join Meeting button (only visible when invited; agency rule)
+  // Join Meeting button (only visible when invited; agency rule). Clicking it
+  // seats the avatar in the in-office meeting room (existing behavior).
   const meetingBtn = document.createElement("button");
   meetingBtn.type = "button";
   meetingBtn.className = "hud-meeting-btn";
   meetingBtn.hidden = true;
 
-  topBar.append(logo, areaName, statusWrap, meetingBtn);
+  // "Open Meet" anchor — a DISTINCT, explicit affordance that opens the external
+  // Google Meet call in a new tab. Shown only when the meeting payload carries a
+  // meetLink. Separate from the room-join button: one seats your avatar, this one
+  // opens the call. Both are explicit clicks (human-agency rule; never auto-open).
+  const meetLinkAnchor = document.createElement("a");
+  meetLinkAnchor.className = "hud-meet-link";
+  meetLinkAnchor.target = "_blank";
+  meetLinkAnchor.rel = "noopener noreferrer";
+  meetLinkAnchor.textContent = "🎥 Open Meet";
+  meetLinkAnchor.hidden = true;
+
+  topBar.append(logo, areaName, statusWrap, meetingBtn, meetLinkAnchor);
 
   // --- Right sidebar -------------------------------------------------------
   const sidebar = document.createElement("div");
@@ -219,7 +231,22 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     if (!m) {
       meetingBtn.hidden = true;
       meetingBtn.onclick = null;
+      meetLinkAnchor.hidden = true;
+      meetLinkAnchor.removeAttribute("href");
       return;
+    }
+
+    // Optional Meet link (server populates MeetingInfo.meetLink from the calendar
+    // event's hangoutLink). Coded optimistically with optional access so this
+    // compiles before the shared `meetLink?: string` field lands. Render the
+    // external-call anchor only when a usable link is present.
+    const meetLink = (m as { meetLink?: string }).meetLink;
+    if (meetLink) {
+      meetLinkAnchor.href = meetLink;
+      meetLinkAnchor.hidden = false;
+    } else {
+      meetLinkAnchor.removeAttribute("href");
+      meetLinkAnchor.hidden = true;
     }
     meetingBtn.hidden = false;
     if (state.joinedMeeting) {
