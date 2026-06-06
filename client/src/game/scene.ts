@@ -13,11 +13,13 @@
 
 import Phaser from "phaser";
 import {
+  EMOTE_EMOJI,
   PresenceState,
   areaAt,
   buildOfficeMap,
   isWalkable,
   type Direction,
+  type Emote,
   type FurnitureKind,
   type OfficeMap,
   type PlayerSnapshot,
@@ -32,8 +34,14 @@ import {
   DEPTH_OVERLAY,
   DEPTH_RUG,
   DEPTH_WALL,
+  EMOTE_MS,
+  PAN_MS,
+  PAN_RESUME_MS,
   STEP_MS,
   TILE,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  ZOOM_TWEEN_MS,
 } from "./constants";
 import {
   TEX,
@@ -69,6 +77,9 @@ interface Avatar {
   badgeIcon: Phaser.GameObjects.Text;
   bubble?: Phaser.GameObjects.Container;
   bubbleTimer?: Phaser.Time.TimerEvent;
+  /** Active emote bubble (capped at one per avatar; replaced on a new emote). */
+  emote?: Phaser.GameObjects.Container;
+  emoteTimer?: Phaser.Time.TimerEvent;
   /** In-flight grid step tween, if any (remote interpolation / local step). */
   stepTween?: Phaser.Tweens.Tween;
   presence: PresenceState;
@@ -79,6 +90,7 @@ interface Avatar {
 export interface SceneCallbacks {
   onLocalMove(x: number, y: number, dir: Direction, moving: boolean): void;
   onAreaChange(areaName: string): void;
+  onAvatarClick(sessionId: string): void;
 }
 
 const BADGE_FOR: Record<PresenceState, string> = {
@@ -105,6 +117,14 @@ export class OfficeScene extends Phaser.Scene {
   /** Furniture pieces that flip between base/alt textures for a glow flicker. */
   private flickerPieces: { img: Phaser.GameObjects.Image; kind: FurnitureKind }[] = [];
   private flickerOn = false;
+  /** When true, decorative tweens/particles are skipped (accessibility). */
+  private reducedMotion = false;
+  /** Whether ambient NPC avatars are currently visible. */
+  private npcVisible = true;
+  /** Coffee-machine steam emitters, tracked so reduced-motion can pause them. */
+  private steamEmitters: Phaser.GameObjects.Particles.ParticleEmitter[] = [];
+  /** Timer that resumes following the local avatar after a pan-to-player. */
+  private panResumeTimer?: Phaser.Time.TimerEvent;
 
   constructor() {
     super({ key: "office" });
@@ -157,6 +177,10 @@ export class OfficeScene extends Phaser.Scene {
 
     const dir = this.pollDirection();
     if (!dir) return;
+
+    // Any local movement input cancels a pan-to-player and snaps the camera
+    // back to following the local avatar (human agency: the user is in control).
+    if (this.panResumeTimer) this.resumeFollowSelf();
 
     // Face that way even if blocked (Emerald turn-in-place feel).
     self.snap.dir = dir;
@@ -264,10 +288,13 @@ export class OfficeScene extends Phaser.Scene {
       quantity: 1,
     });
     emitter.setDepth(DEPTH_ENTITY_BASE + (fy + 1) * TILE + 2);
+    this.steamEmitters.push(emitter);
+    if (this.reducedMotion) emitter.stop();
   }
 
   /** One-shot dust puff burst at a tile centre (teleport feedback). */
   private dustPuff(tileX: number, tileY: number): void {
+    if (this.reducedMotion) return; // decorative only
     const x = tileX * TILE + TILE / 2;
     const y = tileY * TILE + TILE / 2 + 6;
     const emitter = this.add.particles(x, y, TEX.dust, {
@@ -302,6 +329,19 @@ export class OfficeScene extends Phaser.Scene {
     sprite.setOrigin(0.5, 0.75); // feet near the tile centre
     sprite.setFrame(frameIndex(poseDirFor(snap.dir)));
 
+    // Clicking an avatar (self included) opens the UI profile card. Generous
+    // 32x32 hit area centred on the sprite frame; hand cursor on hover. Pure
+    // delegation to the UI — the scene holds no profile/business logic.
+    const hit = new Phaser.Geom.Rectangle(0, 0, TILE, TILE);
+    sprite.setInteractive({
+      hitArea: hit,
+      hitAreaCallback: Phaser.Geom.Rectangle.Contains,
+      useHandCursor: true,
+    });
+    sprite.on(Phaser.Input.Events.POINTER_DOWN, () => {
+      this.cb.onAvatarClick(snap.sessionId);
+    });
+
     const nameTag = this.add.text(px, py - TILE * 0.95, isSelf ? `${snap.name} (you)` : snap.name, {
       fontFamily: "monospace",
       fontSize: "11px",
@@ -333,14 +373,31 @@ export class OfficeScene extends Phaser.Scene {
     this.avatars.set(snap.sessionId, avatar);
     this.applyDepth(avatar);
     this.applyPresenceAnim(avatar);
+    // Newly joined NPCs respect the current hide-NPCs flag immediately.
+    if (avatar.snap.isNpc && !this.npcVisible) this.applyAvatarVisibility(avatar, false);
     return avatar;
+  }
+
+  /** Show/hide every visual part of one avatar (sprite, shadow, tags, bubbles). */
+  private applyAvatarVisibility(a: Avatar, visible: boolean): void {
+    a.sprite.setVisible(visible);
+    a.shadow.setVisible(visible);
+    a.nameTag.setVisible(visible);
+    // The badge has its own empty-state visibility; only force-show when the
+    // presence actually has an icon, otherwise keep it hidden.
+    a.badge.setVisible(visible && BADGE_FOR[a.presence] !== "");
+    a.bubble?.setVisible(visible);
+    a.emote?.setVisible(visible);
   }
 
   /** Redraw the dark pill behind the presence icon, or hide it when empty. */
   private drawBadgePill(a: Avatar): void {
     a.badgeBg.clear();
     const icon = BADGE_FOR[a.presence];
-    a.badge.setVisible(icon !== "");
+    // A hidden NPC's badge must stay hidden even when presence (and thus the
+    // pill) is redrawn; otherwise it would reappear above an invisible avatar.
+    const hiddenNpc = a.snap.isNpc === true && !this.npcVisible;
+    a.badge.setVisible(icon !== "" && !hiddenNpc);
     if (icon === "") return;
     const w = a.badgeIcon.width + 8;
     const h = a.badgeIcon.height + 4;
@@ -376,6 +433,7 @@ export class OfficeScene extends Phaser.Scene {
     a.nameTag.setPosition(px, py - TILE * 0.95);
     a.badge.setPosition(px + a.nameTag.displayWidth / 2 + 10, py - TILE * 0.95 - 6);
     if (a.bubble) a.bubble.setPosition(px, py - TILE * 1.35);
+    if (a.emote) a.emote.setPosition(px, py - TILE * 1.3);
   }
 
   // -------------------------------------------------------------------------
@@ -463,6 +521,7 @@ export class OfficeScene extends Phaser.Scene {
       existing.snap = { ...snap };
       this.placeInstant(existing, snap.x, snap.y);
       this.setPresenceBadge(existing, snap.presence);
+      this.applyAvatarVisibility(existing, !existing.snap.isNpc || this.npcVisible);
       return;
     }
     this.spawnAvatar(snap, false);
@@ -474,6 +533,8 @@ export class OfficeScene extends Phaser.Scene {
     a.stepTween?.stop();
     a.bubbleTimer?.remove();
     a.bubble?.destroy();
+    a.emoteTimer?.remove();
+    a.emote?.destroy();
     a.sprite.destroy();
     a.shadow.destroy();
     a.nameTag.destroy();
@@ -593,5 +654,138 @@ export class OfficeScene extends Phaser.Scene {
       a.bubble = undefined;
       a.bubbleTimer = undefined;
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Emotes — small round bouncy bubble above the name tag (distinct from chat)
+  // -------------------------------------------------------------------------
+
+  apiShowEmote(sessionId: string, emote: string): void {
+    const a = this.avatars.get(sessionId);
+    if (!a) return;
+    const glyph = EMOTE_EMOJI[emote as Emote];
+    if (!glyph) return; // unknown emote — ignore (defensive; UI sends valid ones)
+
+    // Cap one active emote per avatar: replace any in-flight one.
+    a.emoteTimer?.remove();
+    a.emote?.destroy();
+
+    const r = 13; // bubble radius
+    const bg = this.add.graphics();
+    bg.fillStyle(0xf4f6f8, 0.97);
+    bg.fillCircle(0, 0, r);
+    bg.lineStyle(1, 0xc6ccd2, 0.9);
+    bg.strokeCircle(0, 0, r);
+    bg.fillStyle(0xf4f6f8, 0.97);
+    bg.fillTriangle(-4, r - 2, 4, r - 2, 0, r + 5); // little tail toward the head
+
+    const glyphText = this.add.text(0, -1, glyph, { fontSize: "15px" });
+    glyphText.setOrigin(0.5, 0.5);
+
+    const container = this.add.container(a.sprite.x, a.sprite.y - TILE * 1.3, [bg, glyphText]);
+    container.setDepth(DEPTH_OVERLAY + 2); // above chat bubbles
+    if (a.snap.isNpc && !this.npcVisible) container.setVisible(false);
+    a.emote = container;
+
+    const settle = () => {
+      a.emoteTimer = this.time.delayedCall(EMOTE_MS, () => {
+        if (this.reducedMotion) {
+          container.destroy();
+          a.emote = undefined;
+          a.emoteTimer = undefined;
+          return;
+        }
+        this.tweens.add({
+          targets: container,
+          alpha: 0,
+          duration: 250,
+          ease: "Sine.easeIn",
+          onComplete: () => {
+            container.destroy();
+            if (a.emote === container) a.emote = undefined;
+            a.emoteTimer = undefined;
+          },
+        });
+      });
+    };
+
+    if (this.reducedMotion) {
+      // Instant show — no decorative bounce.
+      settle();
+      return;
+    }
+    container.setScale(0);
+    this.tweens.add({
+      targets: container,
+      scale: 1,
+      duration: 320,
+      ease: "Back.easeOut",
+      onComplete: settle,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Camera: pan-to-player, zoom, reduced-motion, NPC visibility
+  // -------------------------------------------------------------------------
+
+  /** Smooth-pan the camera to an avatar, then resume following self. Never moves avatars. */
+  apiPanToPlayer(sessionId: string): void {
+    const a = this.avatars.get(sessionId);
+    if (!a) return;
+    const cam = this.cameras.main;
+
+    // Stop following so the manual pan is not fought by the follow lerp.
+    cam.stopFollow();
+    this.panResumeTimer?.remove();
+
+    const tx = a.sprite.x;
+    const ty = a.sprite.y;
+    if (this.reducedMotion) {
+      cam.centerOn(tx, ty); // instant jump
+    } else {
+      cam.pan(tx, ty, PAN_MS, "Sine.easeInOut", true);
+    }
+
+    // Resume following the LOCAL avatar after a short dwell. A held movement
+    // key cancels this early (see update()).
+    this.panResumeTimer = this.time.delayedCall(PAN_RESUME_MS, () => {
+      this.resumeFollowSelf();
+    });
+  }
+
+  private resumeFollowSelf(): void {
+    this.panResumeTimer?.remove();
+    this.panResumeTimer = undefined;
+    const self = this.avatars.get(this.selfId);
+    if (!self) return;
+    this.cameras.main.startFollow(self.sprite, true, 0.15, 0.15);
+  }
+
+  /** Set the camera zoom (clamped) with a smooth tween (instant in reduced motion). */
+  apiSetZoom(zoom: number): void {
+    const z = Phaser.Math.Clamp(zoom, ZOOM_MIN, ZOOM_MAX);
+    const cam = this.cameras.main;
+    if (this.reducedMotion) {
+      cam.setZoom(z);
+    } else {
+      cam.zoomTo(z, ZOOM_TWEEN_MS, "Sine.easeInOut", true);
+    }
+  }
+
+  /** Show/hide every NPC avatar; joining/leaving NPCs respect this flag. */
+  apiSetNpcVisibility(visible: boolean): void {
+    this.npcVisible = visible;
+    for (const a of this.avatars.values()) {
+      if (a.snap.isNpc) this.applyAvatarVisibility(a, visible);
+    }
+  }
+
+  /** Toggle reduced motion: skip decorative tweens; pause/resume steam. */
+  apiSetReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+    for (const e of this.steamEmitters) {
+      if (on) e.stop();
+      else e.start();
+    }
   }
 }

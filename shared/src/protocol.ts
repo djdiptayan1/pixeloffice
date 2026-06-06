@@ -7,6 +7,7 @@ import type {
   AvatarId,
   Department,
   Direction,
+  Emote,
   MeetingInfo,
   PlayerSnapshot,
   PresenceSource,
@@ -27,6 +28,7 @@ export const C2S = {
   LEAVE_EVENT: "leave-event",
   JOIN_MEETING: "join-meeting",
   LEAVE_MEETING: "leave-meeting",
+  EMOTE: "emote",
 } as const;
 
 /** Options sent when joining the room (dev auth profile). */
@@ -61,6 +63,11 @@ export interface JoinMeetingPayload {
   meetingId: string;
 }
 
+/** Pop an ephemeral emote bubble over the sender's OWN avatar (never another). */
+export interface EmotePayload {
+  emote: Emote;
+}
+
 // ---------------------------- server -> client ----------------------------
 
 export const S2C = {
@@ -77,6 +84,7 @@ export const S2C = {
   MEETING_STARTED: "meeting-started",
   MEETING_ENDED: "meeting-ended",
   TOAST: "toast",
+  EMOTE: "emote",
 } as const;
 
 export interface WelcomePayload {
@@ -148,4 +156,10 @@ export interface MeetingEndedPayload {
 export interface ToastPayload {
   message: string;
   kind: "info" | "event" | "meeting" | "broadcast";
+}
+
+/** Broadcast to ALL (including sender) when a player emotes. Ephemeral; not stored. */
+export interface EmoteBroadcastPayload {
+  sessionId: string;
+  emote: Emote;
 }
