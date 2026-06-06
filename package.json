@@ -1,0 +1,22 @@
+{
+  "name": "pixeloffice",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PixelOffice — a multiplayer virtual office (presence, meetings, social interaction, team awareness)",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "test": "npm run test -w server",
+    "build": "npm run build -w client",
+    "smoke": "npm run smoke -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

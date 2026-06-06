@@ -1,0 +1,100 @@
+// ---------------------------------------------------------------------------
+// Public game-layer entry point. This is the ONLY surface the UI layer touches
+// (CONTRACT.md: game <-> UI boundary). It boots a Phaser game with the office
+// scene and returns an imperative handle the UI bridge drives from network
+// messages. The game owns the local avatar; the UI never reaches into Phaser.
+//
+// Pure rendering layer: NO network, NO presence/meeting business logic here.
+// ---------------------------------------------------------------------------
+
+import Phaser from "phaser";
+import type { Direction, PlayerSnapshot, PresenceState } from "@pixeloffice/shared";
+import { BG_COLOR_NUM } from "./constants";
+import { OfficeScene } from "./scene";
+
+export interface OfficeGameHandle {
+  addPlayer(p: PlayerSnapshot): void; // remote players only
+  removePlayer(sessionId: string): void;
+  movePlayer(sessionId: string, x: number, y: number, dir: Direction, moving: boolean): void;
+  teleportPlayer(sessionId: string, x: number, y: number): void; // may target self
+  setPresence(sessionId: string, state: PresenceState): void; // also accepts self sessionId
+  showChatBubble(sessionId: string, text: string): void; // also accepts self sessionId
+  /** Lock keyboard movement while the user is typing in the HUD (chat focus). */
+  setInputLocked(locked: boolean): void;
+  destroy(): void;
+}
+
+export interface CreateGameOptions {
+  parent: HTMLElement;
+  self: PlayerSnapshot; // the game creates and controls the local avatar itself
+  onLocalMove(x: number, y: number, dir: Direction, moving: boolean): void;
+  onAreaChange?(areaName: string): void; // local player entered a named area ("Hallway" when none)
+}
+
+export function createOfficeGame(opts: CreateGameOptions): Promise<OfficeGameHandle> {
+  return new Promise((resolve) => {
+    const scene = new OfficeScene();
+
+    const game = new Phaser.Game({
+      type: Phaser.AUTO,
+      parent: opts.parent,
+      backgroundColor: BG_COLOR_NUM,
+      pixelArt: true,
+      roundPixels: true,
+      scale: {
+        mode: Phaser.Scale.RESIZE,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+      },
+      render: { antialias: false },
+      // No scene in the config: scenes given here auto-start with empty data,
+      // which would run init() before we can hand it the self snapshot.
+    });
+
+    const callbacks = {
+      onLocalMove: opts.onLocalMove,
+      onAreaChange: (areaName: string) => opts.onAreaChange?.(areaName),
+    };
+
+    // Resolve only once the scene's create() has built the local avatar, so the
+    // UI bridge can safely target self (teleport/presence) from the first message.
+    game.events.once("office-ready", () => {
+      resolve(makeHandle(game, scene));
+    });
+
+    // Add the scene WITHOUT auto-start, then start it with the local snapshot
+    // + callbacks so init() always receives its data.
+    game.events.once(Phaser.Core.Events.READY, () => {
+      game.scene.add("office", scene, false);
+      game.scene.start("office", { self: opts.self, cb: callbacks });
+    });
+  });
+}
+
+function makeHandle(game: Phaser.Game, scene: OfficeScene): OfficeGameHandle {
+  return {
+    addPlayer(p) {
+      scene.apiAddPlayer(p);
+    },
+    removePlayer(sessionId) {
+      scene.apiRemovePlayer(sessionId);
+    },
+    movePlayer(sessionId, x, y, dir, moving) {
+      scene.apiMovePlayer(sessionId, x, y, dir, moving);
+    },
+    teleportPlayer(sessionId, x, y) {
+      scene.apiTeleportPlayer(sessionId, x, y);
+    },
+    setPresence(sessionId, state) {
+      scene.apiSetPresence(sessionId, state);
+    },
+    showChatBubble(sessionId, text) {
+      scene.apiShowBubble(sessionId, text);
+    },
+    setInputLocked(locked) {
+      scene.setInputLocked(locked);
+    },
+    destroy() {
+      game.destroy(true);
+    },
+  };
+}

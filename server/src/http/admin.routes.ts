@@ -1,0 +1,138 @@
+// ---------------------------------------------------------------------------
+// Admin REST API (mounted at /api). Plain Express router.
+//
+// PRODUCTION NOTE: per plan.md (Security), these endpoints MUST be protected by
+// OAuth-backed JWT authentication + role-based access control (RBAC) before
+// shipping. V1 is open for local development only. Keep that gate HERE — the
+// services below stay framework- and auth-agnostic.
+// ---------------------------------------------------------------------------
+
+import { Router, type Request, type Response } from "express";
+import {
+  S2C,
+  areaAt,
+  buildOfficeMap,
+  type SocialEventType,
+  type ToastPayload,
+} from "@pixeloffice/shared";
+import { container } from "../container";
+import { isSocialEventType } from "../events/event.service";
+
+const DEFAULT_EVENT_MINUTES = 15;
+const DEFAULT_MEETING_DURATION = 30;
+const DEFAULT_MEETING_START = 0;
+
+/** Human-readable default titles per social event type. */
+const EVENT_TITLES: Record<SocialEventType, string> = {
+  COFFEE_BREAK: "Coffee Break",
+  TEA_BREAK: "Tea Break",
+  TEAM_GATHERING: "Team Gathering",
+  TOWN_HALL: "Town Hall",
+};
+
+export function createAdminRouter(): Router {
+  const router = Router();
+  const map = buildOfficeMap();
+
+  // GET /api/health -------------------------------------------------------
+  router.get("/health", (_req: Request, res: Response) => {
+    res.json({ ok: true });
+  });
+
+  // GET /api/users — connected players with presence + current area --------
+  router.get("/users", (_req: Request, res: Response) => {
+    const room = container.registry.room;
+    if (!room) {
+      res.json({ users: [] });
+      return;
+    }
+    const users = room.listPlayers().map((p) => {
+      const area = areaAt(map, p.x, p.y);
+      return {
+        sessionId: p.sessionId,
+        userId: p.userId,
+        name: p.name,
+        department: p.department,
+        avatarId: p.avatarId,
+        x: p.x,
+        y: p.y,
+        presence: p.presence,
+        source: p.source,
+        area: area ? area.name : "Hallway",
+      };
+    });
+    res.json({ users });
+  });
+
+  // POST /api/events { type, title?, durationMinutes? } --------------------
+  router.post("/events", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const type = body.type;
+    if (!isSocialEventType(type)) {
+      res.status(400).json({ error: "Invalid or missing event type" });
+      return;
+    }
+    const title =
+      typeof body.title === "string" && body.title.trim().length > 0
+        ? body.title.trim()
+        : EVENT_TITLES[type];
+    const durationMinutes = positiveNumber(body.durationMinutes, DEFAULT_EVENT_MINUTES);
+
+    // The room's "created" listener handles broadcasting + the toast.
+    const event = container.events.createEvent(type, title, durationMinutes, Date.now());
+    res.status(201).json({ event });
+  });
+
+  // POST /api/broadcast { message } ---------------------------------------
+  router.post("/broadcast", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    if (message.length === 0) {
+      res.status(400).json({ error: "message is required" });
+      return;
+    }
+    const room = container.registry.room;
+    if (!room) {
+      res.status(503).json({ error: "No active room" });
+      return;
+    }
+    const toast: ToastPayload = { message, kind: "broadcast" };
+    room.broadcast(S2C.TOAST, toast);
+    res.status(202).json({ ok: true });
+  });
+
+  // POST /api/meetings { title, startsInMinutes?, durationMinutes?, participantIds? }
+  router.post("/meetings", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (title.length === 0) {
+      res.status(400).json({ error: "title is required" });
+      return;
+    }
+    const startsInMinutes = nonNegativeNumber(body.startsInMinutes, DEFAULT_MEETING_START);
+    const durationMinutes = positiveNumber(body.durationMinutes, DEFAULT_MEETING_DURATION);
+    const participantIds = Array.isArray(body.participantIds)
+      ? body.participantIds.filter((id): id is string => typeof id === "string")
+      : [];
+
+    // Seeds the mock calendar; the presence tick (~3s) detects start/end and
+    // emits MEETING_STARTED/ENDED — never auto-moves avatars (agency rule).
+    const meeting = container.mockCalendar.createMeeting(
+      { title, startsInMinutes, durationMinutes, participantIds },
+      Date.now(),
+    );
+    res.status(201).json({ meeting });
+  });
+
+  return router;
+}
+
+function positiveNumber(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function nonNegativeNumber(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
