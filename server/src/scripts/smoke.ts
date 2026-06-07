@@ -81,6 +81,7 @@ async function main(): Promise<void> {
   // Set up collectors before sending anything.
   const welcomesA = collector<WelcomePayload>(roomA, S2C.WELCOME);
   const presenceA = collector<PresencePayload>(roomA, S2C.PRESENCE);
+  const emotesA = collector<{ sessionId: string; emote: string }>(roomA, S2C.EMOTE);
   const teleportsA = collector<PlayerTeleportedPayload>(roomA, S2C.PLAYER_TELEPORTED);
   const eventsCreatedA = collector<{ event: { id: string } }>(roomA, S2C.EVENT_CREATED);
   const meetingsStartedA = collector<{ meeting: { id: string; title: string } }>(
@@ -110,6 +111,17 @@ async function main(): Promise<void> {
   } else {
     roomA.send(C2S.MOVE, firstStep);
     pass(`MOVE to (${firstStep.x},${firstStep.y})`);
+  }
+
+  // 2b. EMOTE should echo to the sender (client-visible social expression).
+  roomA.send(C2S.EMOTE, { emote: "WAVE" });
+  try {
+    await waitFor("EMOTE echo", () =>
+      emotesA.find((m) => m.sessionId === roomA.sessionId && m.emote === "WAVE"),
+    );
+    pass("EMOTE echoed to sender");
+  } catch (e) {
+    fail("EMOTE echoed to sender", (e as Error).message);
   }
 
   // 3. Second client joins; roomA must receive PLAYER_JOINED, then PLAYER_MOVED

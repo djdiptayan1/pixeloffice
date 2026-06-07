@@ -125,7 +125,7 @@ export function createAdminRouter(): Router {
     res.status(202).json({ ok: true });
   });
 
-  // POST /api/meetings { title, startsInMinutes?, durationMinutes?, participantIds? }
+  // POST /api/meetings { title, startsInMinutes?, durationMinutes?, participantIds?, roomName? }
   router.post("/meetings", guard, (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const title = typeof body.title === "string" ? body.title.trim() : "";
@@ -138,11 +138,19 @@ export function createAdminRouter(): Router {
     const participantIds = Array.isArray(body.participantIds)
       ? body.participantIds.filter((id): id is string => typeof id === "string")
       : [];
+    let roomName: string | undefined;
+    if (typeof body.roomName === "string" && body.roomName.trim().length > 0) {
+      if (!isMeetingRoom(body.roomName, map)) {
+        res.status(400).json({ error: "Invalid meeting room" });
+        return;
+      }
+      roomName = body.roomName;
+    }
 
     // Seeds the mock calendar; the presence tick (~3s) detects start/end and
     // emits MEETING_STARTED/ENDED — never auto-moves avatars (agency rule).
     const meeting = container.mockCalendar.createMeeting(
-      { title, startsInMinutes, durationMinutes, participantIds },
+      { title, startsInMinutes, durationMinutes, participantIds, roomName },
       Date.now(),
     );
     log.info("meeting scheduled", {
@@ -167,4 +175,8 @@ function positiveNumber(value: unknown, fallback: number): number {
 function nonNegativeNumber(value: unknown, fallback: number): number {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function isMeetingRoom(name: string, map: ReturnType<typeof buildOfficeMap>): boolean {
+  return map.areas.some((area) => area.type === "MEETING_ROOM" && area.name === name);
 }
