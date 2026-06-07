@@ -89,7 +89,7 @@ export class MockCalendarAdapter implements CalendarAdapter {
       startTime,
       endTime,
       participantIds,
-      roomName: assignMeetingRoom(participantIds.length),
+      roomName: input.roomName || assignMeetingRoom(participantIds.length),
     };
     this.meetings.push(meeting);
     return meeting;

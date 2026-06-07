@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import {
+  type MeetingInfo,
   PRESENCE_META,
   PresenceState,
   areaAt,
@@ -18,6 +19,7 @@ import {
   type SocialEventType,
 } from "@pixeloffice/shared";
 import type { Store, UiState } from "./state";
+import { mountGameOverlay, type GameOverlayHandle } from "./games";
 
 const MAP = buildOfficeMap();
 const CHAT_MAX = 140;
@@ -64,6 +66,23 @@ function timeLeftLabel(endTime: number): string {
   return `${secs}s left`;
 }
 
+const TIME_FMT = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function timeLabel(epochMs: number): string {
+  return TIME_FMT.format(new Date(epochMs));
+}
+
+function durationLabel(startTime: number, endTime: number): string {
+  const mins = Math.max(1, Math.round((endTime - startTime) / 60000));
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
 export interface HudCallbacks {
   onSetStatus(state: SetStatusPayload["state"]): void;
   onJoinEvent(eventId: string): void;
@@ -73,11 +92,10 @@ export interface HudCallbacks {
   onSendChat(text: string): void;
   /** Notify wiring that the chat input focus changed (to gate game input). */
   onChatFocus?(focused: boolean): void;
-  /** Roster row clicked (not the ⓘ): pan the camera to that player (locate). */
+  onLeaveGame(gameId: string): void;
+  onGameInput(gameId: string, input: any): void;
   onLocate?(sessionId: string): void;
-  /** Roster row ⓘ affordance clicked: open that player's profile card. */
   onOpenProfile?(sessionId: string): void;
-  /** Whether ambient NPC rows should be hidden (live "hide bots" setting). */
   isNpcHidden?(): boolean;
 }
 
@@ -103,6 +121,17 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   layer.className = "hud-layer";
   parent.appendChild(layer);
 
+  // --- Game Prompt ---------------------------------------------------------
+  const promptEl = document.createElement("div");
+  promptEl.className = "hud-interact-prompt";
+  promptEl.style.display = "none";
+  layer.appendChild(promptEl);
+
+  // --- Game Overlay Container ----------------------------------------------
+  const gameOverlayContainer = document.createElement("div");
+  gameOverlayContainer.className = "hud-game-overlay-container";
+  layer.appendChild(gameOverlayContainer);
+
   // --- Top bar -------------------------------------------------------------
   const topBar = document.createElement("div");
   topBar.className = "hud-topbar";
@@ -123,6 +152,8 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   const statusMenu = document.createElement("div");
   statusMenu.className = "hud-status-menu";
   statusMenu.hidden = true;
+  const statusNote = document.createElement("div");
+  statusNote.className = "hud-status-note";
   for (const s of STATUS_OPTIONS) {
     const meta = PRESENCE_META[PresenceState[s as keyof typeof PresenceState]];
     const item = document.createElement("button");
@@ -138,6 +169,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     });
     statusMenu.appendChild(item);
   }
+  statusMenu.appendChild(statusNote);
   statusPill.addEventListener("click", () => {
     statusMenu.hidden = !statusMenu.hidden;
   });
@@ -180,6 +212,15 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   rosterBody.className = "hud-panel-body";
   rosterPanel.append(rosterTitle, rosterBody);
 
+  const meetingsPanel = document.createElement("div");
+  meetingsPanel.className = "hud-panel hud-meetings";
+  const meetingsTitle = document.createElement("h2");
+  meetingsTitle.className = "hud-panel-title";
+  meetingsTitle.textContent = "Meetings";
+  const meetingsBody = document.createElement("div");
+  meetingsBody.className = "hud-panel-body";
+  meetingsPanel.append(meetingsTitle, meetingsBody);
+
   const eventsPanel = document.createElement("div");
   eventsPanel.className = "hud-panel hud-events";
   const eventsTitle = document.createElement("h2");
@@ -189,7 +230,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   eventsBody.className = "hud-panel-body";
   eventsPanel.append(eventsTitle, eventsBody);
 
-  sidebar.append(rosterPanel, eventsPanel);
+  sidebar.append(rosterPanel, meetingsPanel, eventsPanel);
 
   // --- Bottom-left chat ----------------------------------------------------
   const chatBar = document.createElement("div");
@@ -235,6 +276,54 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     caret.className = "hud-caret";
     caret.textContent = "▾";
     statusPill.append(dot, label, caret);
+    if (self?.source === "CALENDAR") {
+      statusNote.hidden = false;
+      statusNote.textContent = "Calendar meeting is controlling your status. Manual choices apply after it ends.";
+    } else if (self?.source === "EVENT") {
+      statusNote.hidden = false;
+      statusNote.textContent = "This status comes from an event you joined.";
+    } else {
+      statusNote.hidden = true;
+      statusNote.textContent = "";
+    }
+  }
+
+  function renderMeetingDetails(m: MeetingInfo | null): void {
+    meetingsBody.innerHTML = "";
+    if (!m) {
+      const empty = document.createElement("div");
+      empty.className = "hud-empty";
+      empty.textContent = "No active meeting.";
+      meetingsBody.appendChild(empty);
+      return;
+    }
+
+    const card = document.createElement("div");
+    card.className = "meeting-card";
+    const title = document.createElement("div");
+    title.className = "meeting-title";
+    title.textContent = m.title;
+    const details = document.createElement("div");
+    details.className = "meeting-details";
+    details.append(
+      detailRow("Start", timeLabel(m.startTime)),
+      detailRow("Duration", durationLabel(m.startTime, m.endTime)),
+      detailRow("Room", m.roomName),
+      detailRow("Invitees", m.participantIds.length === 0 ? "Everyone" : `${m.participantIds.length}`),
+    );
+    card.append(title, details);
+    meetingsBody.appendChild(card);
+  }
+
+  function detailRow(label: string, value: string): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "meeting-detail";
+    const k = document.createElement("span");
+    k.textContent = label;
+    const v = document.createElement("strong");
+    v.textContent = value;
+    row.append(k, v);
+    return row;
   }
 
   function renderMeeting(state: UiState): void {
@@ -419,14 +508,47 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     return card;
   }
 
+  let gameOverlay: GameOverlayHandle | null = null;
+
+  function renderGameOverlay(state: UiState): void {
+    const activeId = state.activeGameId;
+    if (!activeId) {
+      if (gameOverlay) {
+        gameOverlay.destroy();
+        gameOverlay = null;
+        cb.onChatFocus?.(false);
+      }
+      return;
+    }
+
+    const game = state.activeGames.get(activeId);
+    if (!game) return;
+
+    if (!gameOverlay) {
+      cb.onChatFocus?.(true);
+      gameOverlay = mountGameOverlay(gameOverlayContainer, store, cb);
+    }
+    gameOverlay.render(game);
+  }
+
   function render(): void {
     const state = store.get();
     const self = store.self();
     areaName.textContent = state.selfArea || "Hallway";
     renderStatusPill(self);
     renderMeeting(state);
+    renderMeetingDetails(state.myMeeting);
     renderRoster(state);
     renderEvents(state);
+
+    if (state.interactPrompt) {
+      promptEl.textContent = state.interactPrompt;
+      promptEl.style.display = "block";
+    } else {
+      promptEl.style.display = "none";
+    }
+
+    renderGameOverlay(state);
   }
 
   // Re-render once per second so event "time left" countdowns tick down.
@@ -451,6 +573,10 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     destroy(): void {
       window.clearInterval(timerId);
       document.removeEventListener("click", onDocClick);
+      if (gameOverlay) {
+        gameOverlay.destroy();
+        gameOverlay = null;
+      }
       layer.remove();
     },
   };

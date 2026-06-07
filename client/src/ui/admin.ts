@@ -7,10 +7,12 @@
 
 import {
   SOCIAL_EVENT_TYPES,
+  buildOfficeMap,
   type SocialEventType,
 } from "@pixeloffice/shared";
 import { serverHttpBase } from "../net/connection";
 import { readStoredToken } from "./login";
+import { readHideNpcs } from "./settings";
 
 /** Attach the OAuth bearer token when one exists so admin writes work under
  *  AUTH_REQUIRED. On the dev path no token exists and the header is omitted. */
@@ -26,18 +28,38 @@ const EVENT_TYPE_LABELS: Record<SocialEventType, string> = {
   TEAM_GATHERING: "Team Gathering",
   TOWN_HALL: "Town Hall",
 };
+const MEETING_ROOMS = buildOfficeMap()
+  .areas.filter((area) => area.type === "MEETING_ROOM")
+  .map((area) => area.name);
 
 type TabId = "events" | "meetings" | "broadcast" | "users";
 
 interface UserRow {
+  userId?: string;
   name?: string;
   department?: string;
   presence?: string;
   area?: string;
+  isNpc?: boolean;
 }
 
 function api(path: string): string {
   return `${serverHttpBase()}${path}`;
+}
+
+/** Fetch the connected players, surfacing the server's error message on failure. */
+async function fetchUsers(): Promise<{ ok: true; users: UserRow[] } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(api("/api/users"), { headers: authHeaders() });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, error: body?.error || `Could not load users (${res.status}).` };
+    }
+    const data = (await res.json()) as { users?: UserRow[] };
+    return { ok: true, users: Array.isArray(data.users) ? data.users : [] };
+  } catch (err) {
+    return { ok: false, error: `Network error: ${(err as Error).message}` };
+  }
 }
 
 export function createAdmin(parent: HTMLElement): void {
@@ -145,8 +167,14 @@ export function createAdmin(parent: HTMLElement): void {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        let msg = text;
+        try {
+          msg = (JSON.parse(text) as { error?: string }).error || text;
+        } catch {
+          /* not JSON — show the raw text */
+        }
         status.className = "admin-status error";
-        status.textContent = `Failed (${res.status}). ${text}`.trim();
+        status.textContent = msg || `Request failed (${res.status}).`;
         return;
       }
       status.className = "admin-status ok";
@@ -235,12 +263,89 @@ export function createAdmin(parent: HTMLElement): void {
     durationInput.min = "1";
     durationInput.value = "30";
 
+    const roomSel = document.createElement("select");
+    for (const room of MEETING_ROOMS) {
+      const o = document.createElement("option");
+      o.value = room;
+      o.textContent = room;
+      roomSel.appendChild(o);
+    }
+    roomSel.value = "Meeting Room C";
+
     const allCheck = document.createElement("input");
     allCheck.type = "checkbox";
     allCheck.checked = true;
     const allLabel = document.createElement("label");
     allLabel.className = "admin-check";
     allLabel.append(allCheck, document.createTextNode(" Invite all participants"));
+
+    // Individual-invitee picker (shown only when "Invite all" is unchecked).
+    const picker = document.createElement("div");
+    picker.className = "admin-participants";
+    picker.hidden = true;
+
+    const pickerBar = document.createElement("div");
+    pickerBar.className = "admin-users-bar";
+    const pickerTitle = document.createElement("span");
+    pickerTitle.textContent = "Invite who's online:";
+    const pickerRefresh = document.createElement("button");
+    pickerRefresh.type = "button";
+    pickerRefresh.className = "admin-submit";
+    pickerRefresh.textContent = "Refresh";
+    pickerBar.append(pickerTitle, pickerRefresh);
+
+    const pickerStatus = statusLine();
+    const pickerList = document.createElement("div");
+    pickerList.className = "admin-participants-list";
+    picker.append(pickerBar, pickerStatus, pickerList);
+
+    const selected = new Set<string>();
+    let loaded = false;
+
+    async function loadParticipants(): Promise<void> {
+      pickerStatus.className = "admin-status";
+      pickerStatus.textContent = "Loading\u2026";
+      pickerList.innerHTML = "";
+      const result = await fetchUsers();
+      if (!result.ok) {
+        pickerStatus.className = "admin-status error";
+        pickerStatus.textContent = result.error;
+        return;
+      }
+      loaded = true;
+      const humans = result.users.filter((u) => !u.isNpc && u.userId);
+      if (humans.length === 0) {
+        pickerStatus.textContent = "No one is online right now.";
+        return;
+      }
+      pickerStatus.textContent = "";
+      for (const u of humans) {
+        const id = u.userId as string;
+        const row = document.createElement("label");
+        row.className = "admin-check";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = selected.has(id);
+        cb.addEventListener("change", () => {
+          if (cb.checked) selected.add(id);
+          else selected.delete(id);
+        });
+        const avail = (u.presence ?? "").toUpperCase() === "AVAILABLE";
+        row.append(
+          cb,
+          document.createTextNode(
+            ` ${u.name ?? "Unknown"} \u00b7 ${u.department ?? "\u2014"} \u00b7 ${avail ? "available" : (u.presence ?? "").toLowerCase() || "online"}`,
+          ),
+        );
+        pickerList.appendChild(row);
+      }
+    }
+
+    allCheck.addEventListener("change", () => {
+      picker.hidden = allCheck.checked;
+      if (!allCheck.checked && !loaded) void loadParticipants();
+    });
+    pickerRefresh.addEventListener("click", () => void loadParticipants());
 
     const submit = document.createElement("button");
     submit.type = "submit";
@@ -253,20 +358,28 @@ export function createAdmin(parent: HTMLElement): void {
       field("Title", titleInput),
       field("Starts in (minutes)", startsInput),
       field("Duration (minutes)", durationInput),
+      field("Meeting room", roomSel),
       allLabel,
+      picker,
       submit,
       status,
     );
 
     form.addEventListener("submit", (e) => {
       e.preventDefault();
-      // Empty/omitted participants = everyone (per server contract). The admin
-      // dev UI only supports "all"; specific-invitee selection comes with auth.
+      // Empty participants = everyone (server contract); otherwise the selected ids.
+      const participantIds = allCheck.checked ? [] : [...selected];
+      if (!allCheck.checked && participantIds.length === 0) {
+        status.className = "admin-status error";
+        status.textContent = "Pick at least one person, or check “Invite all participants”.";
+        return;
+      }
       const body = {
         title: titleInput.value.trim() || "Team Meeting",
         startsInMinutes: Number(startsInput.value),
         durationMinutes: Number(durationInput.value),
-        participantIds: allCheck.checked ? [] : [],
+        roomName: roomSel.value,
+        participantIds,
       };
       void post("/api/meetings", body, status, "Meeting scheduled.");
     });
@@ -332,25 +445,15 @@ export function createAdmin(parent: HTMLElement): void {
       status.className = "admin-status";
       status.textContent = "Loading…";
       tableWrap.innerHTML = "";
-      try {
-        const res = await fetch(api("/api/users"), { headers: authHeaders() });
-        if (!res.ok) {
-          status.className = "admin-status error";
-          status.textContent = `Failed (${res.status}).`;
-          return;
-        }
-        const data = (await res.json()) as unknown;
-        const rows: UserRow[] = Array.isArray(data)
-          ? (data as UserRow[])
-          : Array.isArray((data as { users?: UserRow[] })?.users)
-            ? (data as { users: UserRow[] }).users
-            : [];
-        status.textContent = "";
-        renderTable(rows);
-      } catch (err) {
+      const result = await fetchUsers();
+      if (!result.ok) {
         status.className = "admin-status error";
-        status.textContent = `Network error: ${(err as Error).message}`;
+        status.textContent = result.error;
+        return;
       }
+      status.textContent = "";
+      const rows = result.users;
+      renderTable(readHideNpcs() ? rows.filter((r) => !r.isNpc) : rows);
     }
 
     function renderTable(rows: UserRow[]): void {

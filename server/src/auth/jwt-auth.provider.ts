@@ -63,9 +63,13 @@ export class JwtAuthProvider implements AuthProvider {
         typeof o.name === "string" && o.name.trim().length > 0
           ? o.name.trim().slice(0, MAX_NAME)
           : (claims.name || claims.email).slice(0, MAX_NAME);
+      // Department: client choice wins (editable from the profile modal), then
+      // the token's IdP value, then the default.
       const department = isDepartment(o.department)
         ? o.department
-        : this.opts.defaultDepartment;
+        : isDepartment(claims.department)
+          ? claims.department
+          : this.opts.defaultDepartment;
       const avatarId = isAvatarId(o.avatarId) ? o.avatarId : AVATAR_IDS[0];
       return { userId: claims.sub, name, department, avatarId };
     }

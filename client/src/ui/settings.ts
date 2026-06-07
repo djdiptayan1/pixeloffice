@@ -9,13 +9,17 @@
 // through callbacks; no presence/meeting business logic lives here.
 // ---------------------------------------------------------------------------
 
-const ZOOM_KEY = "pixeloffice.settings.zoom";
+import { CAMERA_ZOOM, ZOOM_MAX as ZOOM_MAX_CONST, ZOOM_MIN as ZOOM_MIN_CONST } from "../game/constants";
+
+// v2: reset stale stored zooms so the 1.5x default takes effect for everyone.
+const ZOOM_KEY = "pixeloffice.settings.zoom.v2";
 const MOTION_KEY = "pixeloffice.settings.reducedMotion";
 const HIDE_NPC_KEY = "pixeloffice.settings.hideNpcs";
 
-const ZOOM_MIN = 1.0;
-const ZOOM_MAX = 2.0;
-const ZOOM_DEFAULT = 1.0;
+// Slider bounds + default mirror the scene's camera constants.
+const ZOOM_MIN = ZOOM_MIN_CONST;
+const ZOOM_MAX = ZOOM_MAX_CONST;
+const ZOOM_DEFAULT = CAMERA_ZOOM;
 
 export interface SettingsValues {
   zoom: number;

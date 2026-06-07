@@ -579,6 +579,429 @@ const FURNITURE_SPECS: Record<FurnitureKind, FurnSpec> = {
       px(ctx, 8, H / 2 - 1, W - 16, 2, "#6b8265");
     },
   },
+  "desk-engineering": {
+    w: 2,
+    h: 1,
+    flicker: true,
+    draw(ctx, W, H, glow) {
+      transparent(ctx, W, H);
+      // Sleek tech gray desk top
+      outlineRect(ctx, 1, 7, W - 2, H - 11, "#4d5764");
+      px(ctx, 2, 8, W - 4, 1, "#647283"); // sheen
+      px(ctx, 2, H - 6, W - 4, 2, "#323842"); // apron shadow
+
+      // Center Wide Monitor (Curved screen look)
+      const mx = Math.floor(W / 2) - 10;
+      outlineRect(ctx, mx, 1, 20, 14, "#1e222b"); // dark bezel
+      const screenColor = glow ? "#1c2c26" : "#0d1a15";
+      px(ctx, mx + 2, 2, 16, 10, screenColor); // screen
+      // Code syntax lines
+      px(ctx, mx + 3, 3, 5, 1, "#44df7a"); // green keyword
+      px(ctx, mx + 9, 3, 4, 1, "#dfa544"); // yellow function
+      px(ctx, mx + 3, 5, 9, 1, "#4492df"); // blue string
+      px(ctx, mx + 3, 7, 3, 1, "#df5b5b"); // red tag
+      px(ctx, mx + 7, 7, 5, 1, "#44df7a"); // green var
+      if (glow) px(ctx, mx + 13, 7, 1, 1, "#ffffff"); // blinking cursor
+      px(ctx, mx + 3, 9, 7, 1, "#94a0b2"); // comment
+      outlineRect(ctx, mx + 8, 15, 4, 3, "#3a3f48"); // stand
+
+      // Left Vertical Monitor (server status logs)
+      outlineRect(ctx, mx - 9, 2, 7, 13, "#1e222b");
+      px(ctx, mx - 8, 3, 5, 11, "#11151c");
+      px(ctx, mx - 7, 4, 3, 1, "#3ecf6e"); // log line
+      px(ctx, mx - 7, 6, 2, 1, "#e5544b"); // error log
+      px(ctx, mx - 7, 8, 3, 1, "#3ecf6e");
+      px(ctx, mx - 7, 10, 4, 1, "#3ecf6e");
+      px(ctx, mx - 7, 12, 1, 1, glow ? "#ffeb60" : "#a8992c"); // blinking warning dot
+
+      // Keyboard & controller
+      px(ctx, mx - 2, H - 6, 14, 4, "#2d3139"); // keyboard
+      for (let kx = mx - 1; kx < mx + 11; kx += 3) px(ctx, kx, H - 5, 2, 1, "#586070");
+      px(ctx, mx + 14, H - 5, 3, 2, "#ff5b5b"); // red gaming mouse
+
+      // Red Coffee Mug
+      outlineRect(ctx, 4, H - 6, 4, 4, "#d32f2f");
+      px(ctx, 5, H - 5, 2, 2, "#5a3d26"); // coffee inside
+      px(ctx, 8, H - 5, 1, 2, "#d32f2f"); // handle
+
+      // Computer Tower (beside desk)
+      outlineRect(ctx, W - 10, 10, 8, 18, "#252830");
+      px(ctx, W - 8, 12, 4, 1, glow ? "#3ecf6e" : "#1b5e20"); // power LED
+      px(ctx, W - 8, 15, 2, 1, "#4a90e2"); // blue USB glow
+    },
+  },
+  "desk-product": {
+    w: 2,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Warm oak wood desk top
+      outlineRect(ctx, 1, 7, W - 2, H - 11, "#c3a07e");
+      px(ctx, 2, 8, W - 4, 1, "#d9bda3"); // sheen
+      px(ctx, 2, H - 6, W - 4, 2, "#967554"); // apron shadow
+
+      // Laptop (open) on the left
+      outlineRect(ctx, 5, 5, 15, 10, "#4a4f59", "#1c1e23"); // base & screen lip
+      px(ctx, 6, 6, 13, 7, "#7fe2f5"); // blue screen
+      px(ctx, 8, 8, 4, 3, "#e5a154"); // chart bar 1
+      px(ctx, 13, 7, 4, 4, "#3ecf6e"); // chart bar 2
+
+      // Secondary monitor showing charts on the right
+      outlineRect(ctx, W - 24, 1, 18, 14, "#2a2e36");
+      px(ctx, W - 22, 2, 14, 10, "#eef2f6"); // white canvas screen
+      px(ctx, W - 20, 4, 4, 6, "#4a90e2"); // blue bar
+      px(ctx, W - 15, 6, 4, 4, "#f5a623"); // yellow bar
+      px(ctx, W - 10, 8, 2, 2, "#7ed321"); // green bar
+      outlineRect(ctx, W - 17, 15, 4, 3, "#3a3f48"); // stand
+
+      // Colorful sticky notes
+      px(ctx, 25, H - 6, 3, 3, "#ffe066"); // yellow note
+      px(ctx, 29, H - 5, 3, 3, "#ff8787"); // pink note
+
+      // Open planner notebook
+      outlineRect(ctx, W - 14, H - 6, 10, 5, "#ffffff", "#4a4f59"); // white pages
+      px(ctx, W - 13, H - 5, 3, 1, "#bcb4a2"); // notebook lines
+      px(ctx, W - 13, H - 3, 3, 1, "#bcb4a2");
+      px(ctx, W - 9, H - 5, 3, 1, "#bcb4a2");
+      px(ctx, W - 9, H - 3, 3, 1, "#bcb4a2");
+      px(ctx, W - 10, H - 6, 1, 5, "#df5b5b"); // red bookmark thread
+    },
+  },
+  "desk-design": {
+    w: 2,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Clean white desk top
+      outlineRect(ctx, 1, 7, W - 2, H - 11, "#f4f6f8", "#cbd2dc");
+      px(ctx, 2, 8, W - 4, 1, "#ffffff"); // sheen
+      px(ctx, 2, H - 6, W - 4, 2, "#b1b8c2"); // apron shadow
+
+      // Center iMac-style screen
+      const mx = Math.floor(W / 2) - 11;
+      outlineRect(ctx, mx, 1, 22, 14, "#d0d5dd", "#9aa1a9"); // silver bezel
+      px(ctx, mx + 2, 2, 18, 9, "#1e1e1e"); // dark Figma UI canvas
+      px(ctx, mx + 5, 3, 12, 6, "#a259ff"); // purple artboard
+      px(ctx, mx + 7, 4, 4, 2, "#f24e1e"); // orange box in artboard
+      px(ctx, mx + 13, 7, 2, 2, "#1abc9c"); // teal designer cursor arrow
+      outlineRect(ctx, mx + 9, 15, 4, 3, "#b0b5bd"); // silver stand
+
+      // Drawing Tablet (Wacom) on the left
+      outlineRect(ctx, 3, H - 6, 11, 5, "#252830");
+      px(ctx, 4, H - 4, 1, 2, "#1abc9c"); // active indicator
+      px(ctx, 6, H - 5, 6, 1, "#ffffff"); // stylus outline
+
+      // Succulent plant in terracotta pot on the right
+      outlineRect(ctx, W - 9, H - 7, 5, 5, "#d07d58");
+      px(ctx, W - 9, H - 9, 2, 2, "#2ecc71"); // green succulent leaf
+      px(ctx, W - 7, H - 10, 2, 3, "#27ae60");
+      px(ctx, W - 5, H - 8, 2, 2, "#2ecc71");
+    },
+  },
+  "desk-hr": {
+    w: 2,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Mahogany wood desk top
+      outlineRect(ctx, 1, 7, W - 2, H - 11, "#8a5a34");
+      px(ctx, 2, 8, W - 4, 1, "#aa7d56"); // sheen
+      px(ctx, 2, H - 6, W - 4, 2, "#5c3d22"); // apron shadow
+
+      // Standard office monitor showing candidate portal
+      const mx = Math.floor(W / 2) - 8;
+      outlineRect(ctx, mx, 2, 16, 13, "#2e333d");
+      px(ctx, mx + 2, 3, 12, 8, "#ffffff"); // white portal page
+      px(ctx, mx + 3, 4, 10, 2, "#357ab8"); // blue header
+      px(ctx, mx + 4, 7, 2, 2, "#b1b8c2"); // portrait placeholder
+
+      // Manila Folder Organizer
+      outlineRect(ctx, 4, H - 8, 7, 7, "#35485e");
+      px(ctx, 5, H - 7, 2, 2, "#ffd275"); // yellow tab
+      px(ctx, 8, H - 7, 2, 2, "#4a90e2"); // blue tab
+
+      // Resume stack (overlapping white pages)
+      px(ctx, W - 14, H - 7, 8, 6, "#ffffff");
+      px(ctx, W - 15, H - 6, 8, 5, "#f4f6f8"); // page shadow
+      px(ctx, W - 12, H - 5, 5, 1, "#cbd2dc"); // document lines
+      px(ctx, W - 12, H - 3, 5, 1, "#cbd2dc");
+    },
+  },
+  "chair-engineering": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      const cx = Math.floor(W / 2);
+      // Mesh gaming chair: black with red lining
+      outlineRect(ctx, cx - 7, 2, 14, 10, "#1c1e23", "#ff3b30"); // high backrest with red edges
+      px(ctx, cx - 5, 4, 10, 4, "#2d3139"); // center mesh
+      outlineRect(ctx, cx - 8, 12, 16, 6, "#1c1e23", "#ff3b30"); // seat
+      px(ctx, cx - 6, 13, 12, 2, "#2d3139"); // seat padding
+      px(ctx, cx - 1, 18, 2, 7, "#2a2e36"); // post
+      px(ctx, cx - 7, H - 4, 14, 2, "#1c1e23"); // base
+      px(ctx, cx - 7, H - 3, 2, 2, "#111215"); // casters
+      px(ctx, cx + 5, H - 3, 2, 2, "#111215");
+    },
+  },
+  "chair-product": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      const cx = Math.floor(W / 2);
+      // Padded blue corporate task chair
+      outlineRect(ctx, cx - 6, 3, 12, 8, "#357ab8", "#1c2c3e"); // blue back
+      px(ctx, cx - 4, 4, 8, 2, "#4a90e2"); // highlight
+      outlineRect(ctx, cx - 7, 12, 14, 6, "#357ab8", "#1c2c3e"); // blue seat
+      px(ctx, cx - 5, 13, 10, 2, "#4a90e2");
+      px(ctx, cx - 1, 18, 2, 7, "#2a2e36"); // post
+      px(ctx, cx - 6, H - 4, 12, 2, "#22262e"); // base
+    },
+  },
+  "chair-design": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      const cx = Math.floor(W / 2);
+      // Minimalist circular wooden stool/chair
+      outlineRect(ctx, cx - 6, 4, 12, 2, "#4a3f35"); // low wood back outline
+      px(ctx, cx - 1, 6, 2, 6, "#7c848e"); // back support bar
+      outlineRect(ctx, cx - 7, 12, 14, 5, "#c3a07e", "#5c4e43"); // round wood seat
+      px(ctx, cx - 5, 13, 10, 1, "#d9bda3"); // seat sheen
+      px(ctx, cx - 1, 17, 2, 8, "#7c848e"); // post
+      px(ctx, cx - 6, H - 4, 12, 2, "#4a4f59"); // base
+    },
+  },
+  "chair-hr": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      const cx = Math.floor(W / 2);
+      // Comfortable padded teal fabric chair
+      outlineRect(ctx, cx - 7, 3, 14, 9, "#1f6b6b", "#0f3a3a"); // back
+      px(ctx, cx - 5, 4, 10, 3, "#2ea0a0");
+      outlineRect(ctx, cx - 7, 12, 14, 6, "#1f6b6b", "#0f3a3a"); // seat
+      px(ctx, cx - 5, 13, 10, 2, "#2ea0a0");
+      px(ctx, cx - 1, 18, 2, 7, "#2a2e36"); // post
+      px(ctx, cx - 6, H - 4, 12, 2, "#22262e"); // base
+    },
+  },
+  "ping-pong-table": {
+    w: 3,
+    h: 2,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Ping pong green surface
+      outlineRect(ctx, 2, 4, W - 4, H - 8, "#3e9c35", "#1b5e20");
+      
+      // Boundary lines
+      px(ctx, 3, 5, W - 6, 1, "#ffffff"); // top
+      px(ctx, 3, H - 5, W - 6, 1, "#ffffff"); // bottom
+      px(ctx, 3, 5, 1, H - 10, "#ffffff"); // left
+      px(ctx, W - 4, 5, 1, H - 10, "#ffffff"); // right
+      
+      // Net
+      px(ctx, Math.floor(W / 2), 4, 1, H - 8, "#e0e0e0"); // center white net
+      
+      // Paddles and Ball
+      px(ctx, 20, 12, 2, 2, "#df5b5b"); // red paddle
+      px(ctx, W - 22, 16, 2, 2, "#4a90e2"); // blue paddle
+      px(ctx, Math.floor(W / 2) - 4, 10, 1, 1, "#ffeb60"); // yellow ball
+
+      // Legs
+      px(ctx, 4, H - 4, 2, 4, "#1b5e20");
+      px(ctx, W - 6, H - 4, 2, 4, "#1b5e20");
+    },
+  },
+  "vending-machine": {
+    w: 1,
+    h: 1,
+    flicker: true,
+    draw(ctx, W, H, glow) {
+      transparent(ctx, W, H);
+      // Red machine cabinet
+      outlineRect(ctx, 2, 0, W - 4, H - 2, "#b82626", "#6c1212");
+      // Glass viewport
+      outlineRect(ctx, 5, 4, W - 10, 15, "#15171c", "#6c1212");
+      // Soda cans inside
+      px(ctx, 7, 6, 2, 2, "#4a90e2"); // blue
+      px(ctx, 11, 6, 2, 2, "#ff5b5b"); // red
+      px(ctx, 7, 10, 2, 2, "#3ecf6e"); // green
+      px(ctx, 11, 10, 2, 2, "#ffeb60"); // yellow
+      px(ctx, 7, 14, 2, 2, "#f5a623"); // orange
+
+      // Glowing logo header banner
+      px(ctx, 4, 1, W - 8, 2, glow ? "#ffeb60" : "#a8992c");
+
+      // Dispenser slot at bottom
+      outlineRect(ctx, 6, H - 7, 10, 4, "#2d3139");
+    },
+  },
+  "water-cooler": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // White cabinet base
+      outlineRect(ctx, 7, 12, W - 14, H - 14, "#f4f6f8", "#cbd2dc");
+      // Dispenser bay
+      outlineRect(ctx, 9, 15, W - 18, 7, "#2d3139");
+      px(ctx, 11, 16, 2, 2, "#4a90e2"); // cold tap
+      px(ctx, 15, 16, 2, 2, "#df5b5b"); // hot tap
+
+      // Blue transparent inverted water bottle
+      ctx.fillStyle = "rgba(74, 144, 226, 0.7)";
+      ctx.fillRect(8, 2, W - 16, 9);
+      // Neck collar
+      outlineRect(ctx, 10, 10, W - 20, 2, "#cbd2dc");
+      // Water level line inside bottle
+      ctx.fillStyle = "rgba(74, 144, 226, 0.35)";
+      ctx.fillRect(9, 3, W - 18, 3);
+    },
+  },
+  "bookshelf": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Dark wood shelf frame
+      outlineRect(ctx, 1, 0, W - 2, H - 2, "#5a3d26", "#362214");
+      // Shelf slats
+      px(ctx, 2, 10, W - 4, 1, "#362214");
+      px(ctx, 2, 20, W - 4, 1, "#362214");
+
+      // Colorful books
+      px(ctx, 3, 3, 2, 7, "#df5b5b"); // red
+      px(ctx, 5, 4, 2, 6, "#4a90e2"); // blue
+      px(ctx, 8, 3, 2, 7, "#ffeb60"); // yellow
+      px(ctx, 11, 4, 2, 6, "#3ecf6e"); // green
+
+      px(ctx, 3, 13, 2, 7, "#8a52d8"); // purple
+      px(ctx, 6, 13, 2, 7, "#f5a623"); // orange
+      // Leaning books
+      px(ctx, 9, 14, 2, 6, "#4a90e2");
+      px(ctx, 12, 15, 2, 5, "#ffffff");
+    },
+  },
+  "beanbag": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      const cx = Math.floor(W / 2);
+      const cy = Math.floor(H / 2) + 2;
+      // Cozy rounded beanbag in purple
+      ctx.fillStyle = "#8a52d8";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#5f339c";
+      ctx.stroke();
+
+      // Top light sheen
+      ctx.fillStyle = "#a877ee";
+      ctx.beginPath();
+      ctx.arc(cx - 3, cy - 3, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Creases
+      px(ctx, cx - 6, cy + 3, 3, 1, "#5f339c");
+      px(ctx, cx + 4, cy + 2, 2, 1, "#5f339c");
+    },
+  },
+  "whiteboard": {
+    w: 2,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Aluminum board frame
+      outlineRect(ctx, 2, 2, W - 4, H - 6, "#f5f5f5", "#94a0b2");
+      // Marker writing diagrams (nodes, flow arrows)
+      px(ctx, 8, 6, 6, 4, "#2a2e36"); // main box sketch
+      px(ctx, 10, 7, 2, 2, "#4a90e2");
+      px(ctx, 18, 6, 2, 2, "#df5b5b"); // red node
+      px(ctx, 22, 10, 8, 4, "#2a2e36"); // second box
+      // Connector line
+      px(ctx, 15, 8, 6, 1, "#2a2e36");
+      px(ctx, 20, 8, 1, 3, "#2a2e36");
+
+      // Tray at bottom
+      px(ctx, 4, H - 4, W - 8, 1, "#4a4f59");
+    },
+  },
+  "desk-lamp": {
+    w: 1,
+    h: 1,
+    flicker: true,
+    draw(ctx, W, H, glow) {
+      transparent(ctx, W, H);
+      const cx = Math.floor(W / 2);
+      
+      // Warm yellow lamp shade
+      outlineRect(ctx, cx - 6, 2, 12, 6, "#ffd54f", "#8f6a40");
+      px(ctx, cx - 1, 8, 2, 18, "#7c848e"); // brass stand
+      outlineRect(ctx, cx - 5, H - 6, 10, 3, "#4a4f59"); // heavy iron base
+
+      // Yellow light beam cone under the lamp shade (alpha blended)
+      if (glow) {
+        ctx.fillStyle = "rgba(255, 235, 59, 0.16)";
+        ctx.beginPath();
+        ctx.moveTo(cx - 3, 8);
+        ctx.lineTo(cx - 14, H);
+        ctx.lineTo(cx + 14, H);
+        ctx.closePath();
+        ctx.fill();
+      }
+    },
+  },
+  "arcade-cabinet": {
+    w: 1,
+    h: 1,
+    flicker: true,
+    draw(ctx, W, H, glow) {
+      transparent(ctx, W, H);
+      outlineRect(ctx, 3, 0, W - 6, H - 2, "#4a2c8a", "#211042");
+      outlineRect(ctx, 6, 4, W - 12, 13, "#1a1c23", "#211042");
+      px(ctx, 8, 6, 16, 9, glow ? "#122a18" : "#0a180e");
+      px(ctx, 15, 8, 2, 2, "#3ecf6e");
+      px(ctx, 12, 12, 1, 1, "#e5544b");
+      px(ctx, 19, 11, 1, 1, "#e5544b");
+      
+      outlineRect(ctx, 4, 17, W - 8, 5, "#2a2e36");
+      px(ctx, 8, 19, 2, 2, "#ff3b30");
+      px(ctx, 22, 19, 2, 2, "#4a90e2");
+      
+      px(ctx, 5, 1, W - 10, 2, glow ? "#ffeb60" : "#a8992c");
+      
+      px(ctx, 10, H - 6, 4, 3, "#1a1c23");
+      px(ctx, 18, H - 6, 4, 3, "#1a1c23");
+    },
+  },
+  "chess-table": {
+    w: 1,
+    h: 1,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      outlineRect(ctx, 4, 8, W - 8, H - 16, "#8a5a34", "#4a2f1a");
+      px(ctx, 5, 9, W - 10, H - 18, "#9c6b3f");
+      for (let y = 10; y < 22; y += 3) {
+        for (let x = 7; x < 25; x += 3) {
+          const isDark = ((x - 7) / 3 + (y - 10) / 3) % 2 === 0;
+          px(ctx, x, y, 3, 3, isDark ? "#4a2f1a" : "#d8cba6");
+        }
+      }
+      px(ctx, 6, H - 8, 2, 8, "#4a2f1a");
+      px(ctx, W - 8, H - 8, 2, 8, "#4a2f1a");
+      
+      outlineRect(ctx, 0, 10, 3, 10, "#5c3d22");
+      px(ctx, 2, 16, 2, 4, "#5c3d22");
+      outlineRect(ctx, W - 3, 10, 3, 10, "#5c3d22");
+      px(ctx, W - 4, 16, 2, 4, "#5c3d22");
+    },
+  },
 };
 
 function drawFurniture(scene: Phaser.Scene, kind: FurnitureKind): void {

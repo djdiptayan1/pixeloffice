@@ -15,6 +15,11 @@ import { OfficeScene } from "./scene";
 export interface OfficeGameHandle {
   addPlayer(p: PlayerSnapshot): void; // remote players only
   removePlayer(sessionId: string): void;
+  /** Apply a profile change (name/department/avatar) to any player, incl. self. */
+  updatePlayer(
+    sessionId: string,
+    profile: { name: string; department: PlayerSnapshot["department"]; avatarId: PlayerSnapshot["avatarId"] },
+  ): void;
   movePlayer(sessionId: string, x: number, y: number, dir: Direction, moving: boolean): void;
   teleportPlayer(sessionId: string, x: number, y: number): void; // may target self
   setPresence(sessionId: string, state: PresenceState): void; // also accepts self sessionId
@@ -39,8 +44,10 @@ export interface CreateGameOptions {
   self: PlayerSnapshot; // the game creates and controls the local avatar itself
   onLocalMove(x: number, y: number, dir: Direction, moving: boolean): void;
   onAreaChange?(areaName: string): void; // local player entered a named area ("Hallway" when none)
-  /** Called when any avatar (self included) is clicked — UI opens a profile card. */
-  onAvatarClick?(sessionId: string): void;
+  onInteractPrompt?(prompt: string | null, gameId?: string): void;
+  onGameInteract?(gameId: string): void;
+  /** The local user double-clicked their own avatar (open the profile modal). */
+  onProfileOpen?(): void;
 }
 
 export function createOfficeGame(opts: CreateGameOptions): Promise<OfficeGameHandle> {
@@ -65,8 +72,14 @@ export function createOfficeGame(opts: CreateGameOptions): Promise<OfficeGameHan
     const callbacks = {
       onLocalMove: opts.onLocalMove,
       onAreaChange: (areaName: string) => opts.onAreaChange?.(areaName),
-      onAvatarClick: (sessionId: string) => opts.onAvatarClick?.(sessionId),
+      onInteractPrompt: (prompt: string | null, gameId?: string) => opts.onInteractPrompt?.(prompt, gameId),
+      onProfileOpen: () => opts.onProfileOpen?.(),
     };
+
+    // Listen for interact event from the scene and bridge it to the UI
+    game.events.on("lounge-game-interact", (gameId: string) => {
+      opts.onGameInteract?.(gameId);
+    });
 
     // Resolve only once the scene's create() has built the local avatar, so the
     // UI bridge can safely target self (teleport/presence) from the first message.
@@ -90,6 +103,9 @@ function makeHandle(game: Phaser.Game, scene: OfficeScene): OfficeGameHandle {
     },
     removePlayer(sessionId) {
       scene.apiRemovePlayer(sessionId);
+    },
+    updatePlayer(sessionId, profile) {
+      scene.apiUpdatePlayer(sessionId, profile);
     },
     movePlayer(sessionId, x, y, dir, moving) {
       scene.apiMovePlayer(sessionId, x, y, dir, moving);

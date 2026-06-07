@@ -70,6 +70,16 @@ interface AuthConfigResponse {
   authRequired: boolean;
   defaultDepartment?: string;
   departments?: string[];
+  /** Present when the server enables greytHR sign-in (else { enabled: false }). */
+  greythr?: { enabled: boolean; subdomain?: string };
+}
+
+interface GreytHrLoginProfile {
+  name: string;
+  department: string;
+  designation?: string | null;
+  /** Deterministic default avatar from greytHR employeeNo (server-derived). */
+  defaultAvatarId?: string;
 }
 
 function loadSaved(): Partial<SavedProfile> {
@@ -89,12 +99,32 @@ function save(profile: SavedProfile): void {
   }
 }
 
+/** Persist an edited profile (from the profile modal) under the same key the
+ *  login screen reads, so the next session prefills the user's chosen values. */
+export function persistLoginProfile(profile: {
+  name: string;
+  department: Department;
+  avatarId: AvatarId;
+}): void {
+  save(profile);
+}
+
 /** Read the stored OAuth token (used by main.ts to attach to subsequent joins). */
 export function readStoredToken(): string | null {
   try {
     return sessionStorage.getItem(TOKEN_KEY);
   } catch {
     return null;
+  }
+}
+
+/** Clear the stored session token (used on logout so the next load shows the
+ *  sign-in screen instead of auto-joining). */
+export function clearStoredToken(): void {
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -143,6 +173,34 @@ async function fetchMe(token: string): Promise<{ name?: string; email?: string }
   }
 }
 
+/** POST credentials to the server's greytHR login; it mints our JWT. The
+ *  password is sent once to our server (which forwards it to the greytHR ESS
+ *  client) and is never stored in the browser — only the returned token is. */
+async function greytHrLogin(body: {
+  subdomain?: string;
+  loginId: string;
+  password: string;
+}): Promise<{ token: string; profile: GreytHrLoginProfile } | { error: string }> {
+  try {
+    const res = await fetch(`${serverHttpBase()}/api/auth/greythr/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      token?: string;
+      profile?: GreytHrLoginProfile;
+      error?: string;
+    };
+    if (!res.ok || !data.token || !data.profile) {
+      return { error: data.error || `Sign-in failed (${res.status})` };
+    }
+    return { token: data.token, profile: data.profile };
+  } catch {
+    return { error: "Could not reach the office server." };
+  }
+}
+
 export interface LoginHandle {
   hide(): void;
   show(): void;
@@ -158,6 +216,9 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   const saved = loadSaved();
   let selectedAvatar: AvatarId =
     saved.avatarId && AVATAR_IDS.includes(saved.avatarId) ? saved.avatarId : AVATAR_IDS[0];
+  // greytHR company subdomain, autofilled from the server config (.env) so the
+  // user only enters their Employee No + password.
+  let greytHrSubdomain = "";
 
   const root = opts.parent;
   root.innerHTML = "";
@@ -236,6 +297,7 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   const errorLine = document.createElement("div");
   errorLine.className = "login-error";
   errorLine.hidden = true;
+  let activeErrorLine = errorLine;
 
   // Submit button
   const submit = document.createElement("button");
@@ -247,9 +309,13 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   footer.className = "login-footer";
   footer.textContent = "Dev sign-in — Google/Microsoft OAuth in production";
 
+  // Avatar picker; placed in the dev form or above the greytHR button at init.
+  const avatarBlock = document.createElement("div");
+  avatarBlock.append(avatarLabel, swatches);
+
   const form = document.createElement("form");
   form.className = "login-form";
-  form.append(nameLabel, deptLabel, avatarLabel, swatches, errorLine, submit);
+  form.append(nameLabel, deptLabel, errorLine, submit);
 
   // OAuth area (populated only when providers are configured). Sits above the
   // dev form. Reuses existing login-* classes so no styles.css change is needed.
@@ -304,7 +370,93 @@ export function createLogin(opts: LoginOptions): LoginHandle {
     return btn;
   };
 
-  card.append(title, subtitle, oauthArea, divider, form, footer);
+  // greytHR sign-in area (shown only when the server enables greytHR login).
+  const greytHrArea = document.createElement("form");
+  greytHrArea.className = "login-form";
+  greytHrArea.style.marginBottom = "8px";
+  greytHrArea.hidden = true;
+
+  const gtTitle = document.createElement("p");
+  gtTitle.className = "login-footer";
+  gtTitle.style.margin = "0 0 6px";
+  gtTitle.textContent = "Sign in with greytHR";
+
+  const gtIdLabel = document.createElement("label");
+  gtIdLabel.className = "login-label";
+  gtIdLabel.textContent = "Employee No / Login ID";
+  const gtIdInput = document.createElement("input");
+  gtIdInput.className = "login-input";
+  gtIdInput.type = "text";
+  gtIdInput.autocomplete = "username";
+  gtIdInput.placeholder = "e.g. KCC00000";
+  gtIdLabel.appendChild(gtIdInput);
+
+  const gtPwLabel = document.createElement("label");
+  gtPwLabel.className = "login-label";
+  gtPwLabel.textContent = "Password";
+  const gtPwInput = document.createElement("input");
+  gtPwInput.className = "login-input";
+  gtPwInput.type = "password";
+  gtPwInput.autocomplete = "current-password";
+  gtPwLabel.appendChild(gtPwInput);
+
+  const gtError = document.createElement("div");
+  gtError.className = "login-error";
+  gtError.hidden = true;
+
+  const gtSubmit = document.createElement("button");
+  gtSubmit.type = "submit";
+  gtSubmit.className = "login-submit";
+  gtSubmit.textContent = "Sign in with greytHR";
+
+  const setGreytHrBusy = (busy: boolean) => {
+    gtSubmit.disabled = busy;
+    gtSubmit.textContent = busy ? "Signing in\u2026" : "Sign in with greytHR";
+  };
+
+  greytHrArea.append(gtTitle, gtIdLabel, gtPwLabel, gtError, gtSubmit);
+
+  greytHrArea.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const loginId = gtIdInput.value.trim();
+    const password = gtPwInput.value;
+    if (!loginId || !password) {
+      gtError.hidden = false;
+      gtError.textContent = "Enter your Employee No and password.";
+      return;
+    }
+    activeErrorLine = gtError;
+    gtError.hidden = true;
+    setGreytHrBusy(true);
+    void (async () => {
+      const result = await greytHrLogin({
+        subdomain: greytHrSubdomain || undefined,
+        loginId,
+        password,
+      });
+      // Never keep the password around once the request is done.
+      gtPwInput.value = "";
+      if ("error" in result) {
+        gtError.hidden = false;
+        gtError.textContent = result.error;
+        setGreytHrBusy(false);
+        return;
+      }
+      storeToken(result.token);
+      const department: Department = (DEPARTMENTS as readonly string[]).includes(
+        result.profile.department,
+      )
+        ? (result.profile.department as Department)
+        : ((saved.department as Department) ?? DEPARTMENTS[0]);
+      const name = result.profile.name || "Employee";
+      const avatarId = selectedAvatar; // the avatar chosen with the picker above
+      save({ name, department, avatarId });
+      // main.ts hides the card on a successful join.
+      opts.onSubmit({ name, department, avatarId, token: result.token });
+    })();
+  });
+
+  card.append(title, subtitle, oauthArea, greytHrArea, divider, form, footer);
   root.appendChild(card);
 
   // ------------------------------------------------------------------------
@@ -338,14 +490,36 @@ export function createLogin(opts: LoginOptions): LoginHandle {
     }
 
     const config = await fetchAuthConfig();
-    if (config && config.providers.length > 0) {
-      for (const p of config.providers) oauthArea.appendChild(buildOAuthButton(p));
+    const hasOAuth = !!(config && config.providers.length > 0);
+    const hasGreytHr = !!(config && config.greythr && config.greythr.enabled);
+
+    if (hasGreytHr) {
+      // greytHR is the sole sign-in: show only the avatar picker + Employee No /
+      // Password; the avatar sits above the Sign in button.
+      greytHrSubdomain = config!.greythr!.subdomain ?? "";
+      greytHrArea.insertBefore(avatarBlock, gtSubmit);
+      greytHrArea.hidden = false;
+      activeErrorLine = gtError;
+      footer.textContent = "Sign in with your greytHR account";
+      // Remove the guest form + divider (.login-form's display:flex overrides
+      // [hidden], so .hidden alone won't hide it).
+      form.remove();
+      divider.remove();
+      gtIdInput.focus();
+      return;
+    }
+
+    // Non-greytHR paths keep the avatar in the dev/guest form.
+    form.insertBefore(avatarBlock, errorLine);
+
+    if (hasOAuth) {
+      for (const p of config!.providers) oauthArea.appendChild(buildOAuthButton(p));
       oauthArea.hidden = false;
       footer.textContent = "Sign in with your work account";
-      if (config.authRequired) {
-        // Lock down: OAuth only. Hide the dev guest form entirely.
-        form.hidden = true;
-        divider.hidden = true;
+      if (config!.authRequired) {
+        // OAuth-only lockdown: no guest form.
+        form.remove();
+        divider.remove();
       } else {
         divider.hidden = false;
         nameInput.focus();
@@ -363,11 +537,13 @@ export function createLogin(opts: LoginOptions): LoginHandle {
     show() {
       root.style.display = "";
       setBusy(false);
+      setGreytHrBusy(false);
     },
     showError(message: string) {
-      errorLine.hidden = false;
-      errorLine.textContent = message;
+      activeErrorLine.hidden = false;
+      activeErrorLine.textContent = message;
       setBusy(false);
+      setGreytHrBusy(false);
     },
   };
 }

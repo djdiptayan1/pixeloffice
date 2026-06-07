@@ -82,4 +82,19 @@ describe("MockCalendarAdapter — createMeeting validation + room assignment", (
     expect(assignMeetingRoom(8)).toBe("Meeting Room B");
     expect(assignMeetingRoom(9)).toBe("Meeting Room C");
   });
+
+  it("honors an explicit admin-scheduled room override", () => {
+    const cal = new MockCalendarAdapter();
+    const meeting = cal.createMeeting(
+      {
+        title: "Room override",
+        startsInMinutes: 0,
+        durationMinutes: 5,
+        roomName: "Meeting Room A",
+      },
+      NOW,
+    );
+
+    expect(meeting.roomName).toBe("Meeting Room A");
+  });
 });

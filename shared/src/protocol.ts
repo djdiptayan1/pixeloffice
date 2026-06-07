@@ -13,6 +13,7 @@ import type {
   PresenceSource,
   PresenceState,
   SocialEvent,
+  ActiveGame,
 } from "./types";
 
 export const ROOM_NAME = "office";
@@ -24,11 +25,16 @@ export const C2S = {
   MOVE: "move",
   SET_STATUS: "set-status",
   CHAT: "chat",
+  EMOTE: "emote",
   JOIN_EVENT: "join-event",
   LEAVE_EVENT: "leave-event",
   JOIN_MEETING: "join-meeting",
   LEAVE_MEETING: "leave-meeting",
-  EMOTE: "emote",
+  JOIN_GAME: "join-game",
+  LEAVE_GAME: "leave-game",
+  GAME_INPUT: "game-input",
+  /** Edit own profile (name / department / avatar) from the profile modal. */
+  UPDATE_PROFILE: "update-profile",
 } as const;
 
 /** Options sent when joining the room (dev auth profile). */
@@ -55,6 +61,10 @@ export interface ChatPayload {
   text: string;
 }
 
+export interface EmotePayload {
+  emote: Emote;
+}
+
 export interface JoinEventPayload {
   eventId: string;
 }
@@ -63,9 +73,11 @@ export interface JoinMeetingPayload {
   meetingId: string;
 }
 
-/** Pop an ephemeral emote bubble over the sender's OWN avatar (never another). */
-export interface EmotePayload {
-  emote: Emote;
+/** Edit the sender's own profile; each field optional, only valid ones apply. */
+export interface UpdateProfilePayload {
+  name?: string;
+  department?: Department;
+  avatarId?: AvatarId;
 }
 
 // ---------------------------- server -> client ----------------------------
@@ -78,13 +90,16 @@ export const S2C = {
   PLAYER_TELEPORTED: "player-teleported",
   PRESENCE: "presence",
   CHAT: "chat",
+  EMOTE: "emote",
   EVENT_CREATED: "event-created",
   EVENT_UPDATED: "event-updated",
   EVENT_ENDED: "event-ended",
   MEETING_STARTED: "meeting-started",
   MEETING_ENDED: "meeting-ended",
   TOAST: "toast",
-  EMOTE: "emote",
+  GAME_UPDATE: "game-update",
+  /** A player changed their name / department / avatar (profile edit). */
+  PLAYER_UPDATED: "player-updated",
 } as const;
 
 export interface WelcomePayload {
@@ -103,6 +118,14 @@ export interface PlayerJoinedPayload {
 
 export interface PlayerLeftPayload {
   sessionId: string;
+}
+
+/** A player's display profile changed (name / department / avatar). */
+export interface PlayerUpdatedPayload {
+  sessionId: string;
+  name: string;
+  department: Department;
+  avatarId: AvatarId;
 }
 
 export interface PlayerMovedPayload {
@@ -132,6 +155,11 @@ export interface ChatBroadcastPayload {
   text: string;
 }
 
+export interface EmoteBroadcastPayload {
+  sessionId: string;
+  emote: Emote;
+}
+
 export interface EventCreatedPayload {
   event: SocialEvent;
 }
@@ -158,8 +186,19 @@ export interface ToastPayload {
   kind: "info" | "event" | "meeting" | "broadcast";
 }
 
-/** Broadcast to ALL (including sender) when a player emotes. Ephemeral; not stored. */
-export interface EmoteBroadcastPayload {
-  sessionId: string;
-  emote: Emote;
+export interface JoinGamePayload {
+  gameId: string;
+}
+
+export interface LeaveGamePayload {
+  gameId: string;
+}
+
+export interface GameInputPayload {
+  gameId: string;
+  input: any;
+}
+
+export interface GameUpdatePayload {
+  game: ActiveGame;
 }

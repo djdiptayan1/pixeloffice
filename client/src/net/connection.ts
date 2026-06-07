@@ -120,6 +120,7 @@ export class Connection {
 
   // Registered S2C handlers, retained so we can re-attach after a re-join.
   private readonly handlers = new Map<string, MessageHandler<unknown>>();
+  private readonly boundHandlers = new WeakMap<Room, Set<string>>();
 
   // External lifecycle callbacks (set once; survive reconnects).
   private leaveHandler: ((code: number) => void) | null = null;
@@ -193,6 +194,13 @@ export class Connection {
     this.room.send(type, payload);
   }
 
+  /** Merge profile fields into the retained join options so a reconnect
+   *  re-sends the edited values. No-op if not yet connected. */
+  updateJoinProfile(partial: Partial<JoinOptions>): void {
+    if (!this.joinOptions) return;
+    this.joinOptions = { ...this.joinOptions, ...partial };
+  }
+
   /** Called whenever the room is left. Fires for every drop (including those
    *  that trigger an auto-reconnect) — use onState for UI banners instead if you
    *  only care about the user-visible state. */
@@ -257,8 +265,15 @@ export class Connection {
     });
   }
 
-  private bindHandler(room: Room, type: string, handler: MessageHandler<unknown>): void {
-    room.onMessage(type, (payload: unknown) => handler(payload));
+  private bindHandler(room: Room, type: string, _handler: MessageHandler<unknown>): void {
+    let bound = this.boundHandlers.get(room);
+    if (!bound) {
+      bound = new Set();
+      this.boundHandlers.set(room, bound);
+    }
+    if (bound.has(type)) return;
+    bound.add(type);
+    room.onMessage(type, (payload: unknown) => this.handlers.get(type)?.(payload));
   }
 
   private scheduleReconnect(): void {
