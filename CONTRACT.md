@@ -167,7 +167,10 @@ server/src/
   auth/rbac.ts                   # ADMIN_EMAILS -> role
   auth/middleware.ts             # requireAuth / requireRole / createAdminGuard
   http/auth.routes.ts            # /api/auth: config, me, :provider/login, :provider/callback
-  integrations/hr/hr-adapter.ts  # HrAdapter interface (+ MockGreytHr / GreytHr impls)
+  integrations/hr/hr-adapter.ts  # HrAdapter interface (+ MockGreytHr / GreytHrEssAttendance impls)
+  integrations/hr/greythr-ess-attendance.adapter.ts  # check-in/out via the ESS API (GREYTHR_CLIENT_URL)
+  integrations/greythr/greythr-ess.client.ts  # login/logout/account via the ESS API (GREYTHR_CLIENT_URL)
+  auth/greythr/greythr-session.store.ts  # per-user ESS session (login writes, attendance reads)
   integrations/hr/attendance.service.ts  # framework-free explicit-action state machine
   http/hr.routes.ts              # /api/hr: check-in, check-out, status, employee
   persistence/database.ts        # pg Pool wrapper (Database.fromEnv, health, migrate)
@@ -205,7 +208,7 @@ sessionId): it tears down the old game/store and rebuilds from the authoritative
 |---|---|---|---|
 | Auth/JWT | `JWT_SECRET`, `JWT_EXPIRES_IN`, `AUTH_REQUIRED`, `ADMIN_EMAILS` | dev login, ephemeral JWT, open admin | token required to join + admin-only writes |
 | OAuth | `OAUTH_REDIRECT_BASE`, `GOOGLE_*`, `MS_*`, `MS_TENANT`, `CLIENT_APP_URL`, `DEFAULT_DEPARTMENT` | login routes 404; dev card | provider buttons; code→JWT |
-| HR | `GREYTHR_BASE_URL`, `GREYTHR_API_TOKEN`, `GREYTHR_TIMEOUT_MS` | mock adapter | real GreytHR REST adapter |
+| greytHR (login + attendance) | `GREYTHR_LOGIN_ENABLED`, `GREYTHR_CLIENT_URL`, `GREYTHR_SUBDOMAIN`, `GREYTHR_LOGIN_TIMEOUT_MS`, `GREYTHR_PORTAL_URL` | mock adapter, dev login | login/logout/attendance ALL via the self-hosted ESS API (single egress; never greytHR cloud directly) |
 | Persistence | `DATABASE_URL`, `AUTO_MIGRATE`, `REDIS_URL` | in-memory | Postgres users + Redis presence (down→fallback) |
 | Serving/ops | `SERVE_CLIENT`, `PORT`, `API_RATE_LIMIT`, `API_RATE_WINDOW_MS` | Vite serves client; default port/limits | Express serves client; tuned |
 

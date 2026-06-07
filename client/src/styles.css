@@ -260,6 +260,19 @@ body {
   background: var(--panel-3);
 }
 
+.hud-status-note {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+  padding: 8px 10px 7px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.hud-status-note[hidden] {
+  display: none;
+}
+
 .hud-meeting-btn {
   background: linear-gradient(180deg, #ef6258, #e5544b);
   color: #fff;
@@ -337,6 +350,10 @@ body {
 
 .hud-roster {
   flex: 1 1 auto;
+}
+
+.hud-meetings {
+  flex: 0 0 auto;
 }
 
 .hud-panel-title {
@@ -452,6 +469,40 @@ body {
   padding: 14px 10px;
   text-align: center;
   opacity: 0.85;
+}
+
+/* ----------------------------- Meetings --------------------------------- */
+
+.meeting-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px;
+}
+
+.meeting-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.meeting-details {
+  display: grid;
+  gap: 5px;
+}
+
+.meeting-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.meeting-detail strong {
+  color: var(--text);
+  font-weight: 600;
+  text-align: right;
 }
 
 /* ----------------------------- Events ----------------------------------- */
@@ -1024,6 +1075,21 @@ body {
   color: var(--text);
 }
 
+.admin-participants {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.admin-participants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
 .admin-submit {
   background: var(--accent-2);
   color: #fff;
@@ -1172,7 +1238,7 @@ body {
   /* Compact card pinned above the chat input — never covers the top bar. */
   position: absolute;
   left: 12px;
-  bottom: 64px;
+  bottom: 124px;
   width: 264px;
   display: flex;
   flex-direction: column;
@@ -1180,10 +1246,25 @@ body {
   padding-bottom: 10px;
 }
 
+.attendance-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.attendance-header .hud-panel-title {
+  border-bottom: 0;
+  flex: 1 1 auto;
+}
+
 .attendance-widget .attendance-status,
+.attendance-widget .attendance-times,
+.attendance-widget .attendance-elapsed,
 .attendance-widget .attendance-actions,
 .attendance-widget .attendance-feedback {
-  padding: 0 12px;
+  padding: 0 14px;
 }
 
 .attendance-status {
@@ -1253,20 +1334,41 @@ body {
 
 .attendance-portal-link {
   display: inline-block;
-  margin-top: 6px;
+  flex: 0 0 auto;
+  padding-right: 14px;
   font-size: 12px;
   color: var(--accent);
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .attendance-portal-link:hover {
   text-decoration: underline;
 }
 
-/* Theme the attendance time readout if present (kept in sync with the widget). */
+/* Check-in / check-out times: green for in, yellow for out (ui/attendance.ts). */
+.attendance-times {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
 .attendance-time {
+  font-weight: 600;
+}
+.attendance-time-in {
+  color: #3ecf6e;
+}
+.attendance-time-out {
+  color: #e8a13c;
+}
+
+/* Elapsed/worked duration line. */
+.attendance-elapsed {
+  margin-top: 2px;
   font-size: 12px;
-  color: var(--muted);
+  font-weight: 600;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
