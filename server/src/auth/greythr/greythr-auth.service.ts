@@ -5,7 +5,7 @@
 import { AVATAR_IDS, type AvatarId, type Department } from "@pixeloffice/shared";
 import type { JwtService, Role } from "../jwt.service";
 import type { StoredUser, UserRepository } from "../../repositories/user.repository";
-import { roleForEmail } from "../rbac";
+import { resolveRole } from "../rbac";
 import { mapGreytHrDepartment } from "./department-map";
 import {
   GreytHrEssError,
@@ -13,6 +13,10 @@ import {
   type GreytHrEssClient,
   type GreytHrLoginInput,
 } from "../../integrations/greythr/greythr-ess.client";
+import {
+  InMemoryGreytHrSessionStore,
+  type GreytHrSessionStore,
+} from "./greythr-session.store";
 
 /** Identity + display fields returned to the client after a greytHR login. */
 export interface GreytHrLoginProfile {
@@ -48,6 +52,8 @@ export interface GreytHrAuthServiceOptions {
   defaultDepartment: Department;
   /** Lower-cased allowed email domains; empty = no restriction (parity with OAuth). */
   allowedEmailDomains?: Set<string>;
+  /** Per-user greytHR session store (shared with the attendance adapter). */
+  sessions?: GreytHrSessionStore;
 }
 
 /** Login refused; carries an HTTP status for the route to return. */
@@ -78,10 +84,11 @@ function emailDomainAllowed(email: string, allowed: Set<string>): boolean {
 }
 
 export class GreytHrAuthService {
-  /** userId -> greytHR sessionId, captured at login so logout can end it. */
-  private readonly sessions = new Map<string, string>();
+  private readonly sessions: GreytHrSessionStore;
 
-  constructor(private readonly opts: GreytHrAuthServiceOptions) {}
+  constructor(private readonly opts: GreytHrAuthServiceOptions) {
+    this.sessions = opts.sessions ?? new InMemoryGreytHrSessionStore();
+  }
 
   /** Sign in with greytHR credentials (employee no + password). */
   async loginWithCredentials(input: GreytHrLoginInput): Promise<GreytHrLoginOutput> {
@@ -160,7 +167,11 @@ export class GreytHrAuthService {
     };
     await this.opts.users.save(user);
 
-    const role: Role = email ? roleForEmail(email, this.opts.adminEmails) : "member";
+    // Super admins (super-admins.ts) > greytHR managers > members.
+    const role: Role = resolveRole(email, {
+      isManager: account.isManager,
+      adminEmails: this.opts.adminEmails,
+    });
 
     // department is signed as the initial value; the client may override it.
     const token = this.opts.jwt.sign({

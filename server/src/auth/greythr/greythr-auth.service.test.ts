@@ -17,7 +17,7 @@ function account(over: Partial<GreytHrAccount> = {}): GreytHrAccount {
     employeeNo: "KCC00896",
     loginId: "KCC00896",
     name: "Aryan Sharma",
-    email: "aryan@kalvium.com",
+    email: "employee@kalvium.com",
     department: "Engineering",
     designation: "Software Engineer Intern",
     location: "Bengaluru",
@@ -85,7 +85,7 @@ describe("GreytHrAuthService.loginWithCredentials", () => {
 
     const claims = jwt.verify(token);
     expect(claims.sub).toBe("greythr:KCC00896");
-    expect(claims.email).toBe("aryan@kalvium.com");
+    expect(claims.email).toBe("employee@kalvium.com");
     expect(claims.department).toBe("Engineering"); // authoritative department claim
     expect(claims.role).toBe("member");
   });
@@ -122,6 +122,17 @@ describe("GreytHrAuthService.loginWithCredentials", () => {
   it("grants the admin role when the greytHR email is in ADMIN_EMAILS", async () => {
     const client = new FakeEssClient(account({ email: "boss@kalvium.com" }));
     const { service, jwt } = makeService(client, { adminEmails: "boss@kalvium.com" });
+
+    const { token } = await service.loginWithCredentials({
+      loginId: "KCC00896",
+      password: "secret",
+    });
+    expect(jwt.verify(token).role).toBe("admin");
+  });
+
+  it("grants the admin role to a greytHR manager", async () => {
+    const client = new FakeEssClient(account({ isManager: true }));
+    const { service, jwt } = makeService(client);
 
     const { token } = await service.loginWithCredentials({
       loginId: "KCC00896",

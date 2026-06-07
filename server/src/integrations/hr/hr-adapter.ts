@@ -1,22 +1,6 @@
-// ---------------------------------------------------------------------------
-// GreytHR integration boundary (Adapter Pattern, plan Layer 3).
-//
-// Per plan.md ("GreytHR Integration Rules"):
-//   ALLOWED:    employee lookup, department sync, attendance ACTIONS.
-//   FORBIDDEN:  auto-check-in, auto-check-out, auto-logout users.
-//   "All attendance actions must be explicit."
-//
-// This adapter therefore exposes ONLY explicit, caller-driven operations. It
-// never observes activity, never schedules background check-ins/outs, and never
-// touches user sessions. The attendance state machine (attendance.service.ts)
-// invokes checkIn/checkOut only in response to an explicit user click that
-// arrives over the REST API (server/src/http/hr.routes.ts).
-//
-// Integrations are optional (plan Principle 4): the service that depends on this
-// interface wraps every call so a failing/absent GreytHR never breaks the
-// office. With no GREYTHR_* env vars set, the in-memory MockGreytHrAdapter is
-// used and the office behaves exactly as before.
-// ---------------------------------------------------------------------------
+// GreytHR integration boundary (HrAdapter). Exposes only explicit, caller-driven
+// attendance actions (no auto check-in/out). All greytHR traffic goes through the
+// self-hosted ESS API; PixelOffice never calls greytHR cloud directly.
 
 import type { Department } from "@pixeloffice/shared";
 

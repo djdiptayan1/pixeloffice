@@ -21,7 +21,10 @@
 import { DevAuthProvider, type AuthProvider } from "./auth/auth-provider";
 import { buildAuthConfig, type AuthConfig } from "./auth/auth-config";
 import { JwtAuthProvider } from "./auth/jwt-auth.provider";
-import { InMemoryUserRepository, type UserRepository } from "./repositories/user.repository";
+import {
+  InMemoryUserRepository,
+  type UserRepository,
+} from "./repositories/user.repository";
 import { MockCalendarAdapter } from "./integrations/calendar/mock-calendar.adapter";
 import type { CalendarAdapter } from "./integrations/calendar/calendar-adapter";
 import { GoogleCalendarAdapter } from "./integrations/calendar/google-calendar.adapter";
@@ -33,11 +36,14 @@ import {
 import { EventService } from "./events/event.service";
 import { PresenceService } from "./presence/presence.service";
 import type { HrAdapter } from "./integrations/hr/hr-adapter";
-import { MockGreytHrAdapter } from "./integrations/hr/mock-greythr.adapter";
-import { GreytHrAdapter } from "./integrations/hr/greythr.adapter";
+import { GreytHrEssAttendanceAdapter } from "./integrations/hr/greythr-ess-attendance.adapter";
 import { AttendanceService } from "./integrations/hr/attendance.service";
 import { HttpGreytHrEssClient } from "./integrations/greythr/greythr-ess.client";
 import { GreytHrAuthService } from "./auth/greythr/greythr-auth.service";
+import {
+  InMemoryGreytHrSessionStore,
+  type GreytHrSessionStore,
+} from "./auth/greythr/greythr-session.store";
 import { buildGreytHrLoginConfig } from "./auth/greythr/greythr-auth.config";
 import {
   createUserRepository,
@@ -97,12 +103,18 @@ const presence = new PresenceService(calendar, events);
 // NPC_COUNT (default 8, 0 disables, clamped to 16). The room calls spawnAll()
 // at create and tick() on its clock interval; effects become wire broadcasts.
 const npcConfig = npcConfigFromEnv(process.env);
-const npcs = new NpcService(buildOfficeMap(), mulberry32(npcConfig.seed), npcConfig.count);
+const npcs = new NpcService(
+  buildOfficeMap(),
+  mulberry32(npcConfig.seed),
+  npcConfig.count,
+);
 
-// --- Auth: JWT-aware provider in front of the dev provider -----------------
-// buildAuthConfig is the single env-reading entry point for auth. With no env
-// it yields: no OAuth providers, an ephemeral JWT secret, AUTH_REQUIRED=false.
+// Auth provider (JWT in front of dev). greytHR is the single source of truth:
+// when greytHR login is enabled it is the only way in, so a valid token is
+// required to join — no anonymous/dev entry.
 const authConfig: AuthConfig = buildAuthConfig(process.env);
+if (process.env.GREYTHR_LOGIN_ENABLED === "true")
+  authConfig.authRequired = true;
 const devAuth = new DevAuthProvider();
 const auth: AuthProvider = new JwtAuthProvider({
   jwt: authConfig.jwt,
@@ -119,6 +131,10 @@ const usersProxy: UserRepository = {
   findById: (id) => container.users.findById(id),
   all: () => container.users.all(),
 };
+// Shared greytHR session store: login writes, attendance reads.
+const greytHrSessionStore: GreytHrSessionStore =
+  new InMemoryGreytHrSessionStore();
+
 const greytHrAuthService: GreytHrAuthService | null = greytHrLoginConfig
   ? new GreytHrAuthService({
       client: new HttpGreytHrEssClient({
@@ -130,36 +146,28 @@ const greytHrAuthService: GreytHrAuthService | null = greytHrLoginConfig
       adminEmails: authConfig.adminEmails,
       defaultDepartment: authConfig.defaultDepartment,
       allowedEmailDomains: authConfig.allowedEmailDomains,
+      sessions: greytHrSessionStore,
     })
   : null;
 
-// --- HR / GreytHR: real adapter only when env config is present -------------
-// Real adapter activates when GREYTHR_BASE_URL is set AND either an api-user +
-// api-key pair (preferred: the adapter acquires/refreshes its own token) or a
-// legacy pre-acquired GREYTHR_API_TOKEN is provided. Otherwise the in-memory
-// mock is used and the office still works (integrations are optional).
-const greytHrConfigured =
-  Boolean(process.env.GREYTHR_BASE_URL) &&
-  ((Boolean(process.env.GREYTHR_API_USER) && Boolean(process.env.GREYTHR_API_KEY)) ||
-    Boolean(process.env.GREYTHR_API_TOKEN));
-const hr: HrAdapter = greytHrConfigured
-  ? new GreytHrAdapter({
-      baseUrl: process.env.GREYTHR_BASE_URL!,
-      apiUser: process.env.GREYTHR_API_USER,
-      apiKey: process.env.GREYTHR_API_KEY,
-      apiToken: process.env.GREYTHR_API_TOKEN,
-      timeoutMs: Number(process.env.GREYTHR_TIMEOUT_MS) || 5000,
-    })
-  : new MockGreytHrAdapter();
+// HR / GreytHR: all attendance goes through the self-hosted ESS API. No fallback
+// — greytHR is the single source of truth.
+const greytHrEssAttendanceConfigured = greytHrLoginConfig !== null;
+const hr: HrAdapter = new GreytHrEssAttendanceAdapter({
+  baseUrl:
+    greytHrLoginConfig?.baseUrl ??
+    (process.env.GREYTHR_CLIENT_URL?.trim().replace(/\/+$/, "") ||
+      "http://localhost:3000"),
+  sessions: greytHrSessionStore,
+  timeoutMs: greytHrLoginConfig?.timeoutMs,
+});
 const attendance = new AttendanceService(hr);
 
-// greytHR ESS portal deep link surfaced in the attendance widget. Present ONLY
-// when the real integration is configured: GREYTHR_PORTAL_URL if set, else the
-// kalvium ESS home as a sensible default. Undefined on the mock/dev path so the
-// client hides the "Open greytHR" link.
-const DEFAULT_GREYTHR_PORTAL_URL =
-  "https://kalvium.greythr.com/v3/portal/ess/home";
-const hrPortalUrl: string | undefined = greytHrConfigured
+const hrConfigured = greytHrEssAttendanceConfigured;
+
+// "Open greytHR" deep link in the attendance widget (user-clicked, not a server call).
+const DEFAULT_GREYTHR_PORTAL_URL = "https://kalvium.greythr.com";
+const hrPortalUrl: string | undefined = hrConfigured
   ? process.env.GREYTHR_PORTAL_URL || DEFAULT_GREYTHR_PORTAL_URL
   : undefined;
 
@@ -202,8 +210,8 @@ export const container = {
   attendance,
   /** greytHR ESS portal deep link, or undefined when not configured. */
   hrPortalUrl,
-  /** True when the REAL GreytHR adapter is active (vs the in-memory mock). */
-  hrConfigured: greytHrConfigured,
+  hrConfigured,
+  greytHrSessionStore,
   registry,
 
   // Persistence — these getters return the live impls chosen by initContainer().
