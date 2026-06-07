@@ -13,8 +13,8 @@ export { TILE };
 
 /** Milliseconds to walk a single tile (Pokémon Emerald grid step feel). */
 export const STEP_MS = 150;
-/** Camera zoom level. */
-export const CAMERA_ZOOM = 1.4;
+/** Default camera zoom level. */
+export const CAMERA_ZOOM = 1.5;
 /** How long a chat bubble stays on screen. */
 export const BUBBLE_MS = 4000;
 /** Max characters shown in a chat bubble. */
