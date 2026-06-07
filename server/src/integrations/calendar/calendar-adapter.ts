@@ -30,6 +30,8 @@ export interface CreateMeetingInput {
   title: string;
   startsInMinutes: number;
   durationMinutes: number;
+  /** Optional office meeting room override for admin-scheduled mock meetings. */
+  roomName?: string;
   /**
    * Stable user identities (identity.userId) invited. Empty/omitted = everyone
    * in the office.
