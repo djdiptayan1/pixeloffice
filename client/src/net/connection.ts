@@ -120,6 +120,7 @@ export class Connection {
 
   // Registered S2C handlers, retained so we can re-attach after a re-join.
   private readonly handlers = new Map<string, MessageHandler<unknown>>();
+  private readonly boundHandlers = new WeakMap<Room, Set<string>>();
 
   // External lifecycle callbacks (set once; survive reconnects).
   private leaveHandler: ((code: number) => void) | null = null;
@@ -264,8 +265,15 @@ export class Connection {
     });
   }
 
-  private bindHandler(room: Room, type: string, handler: MessageHandler<unknown>): void {
-    room.onMessage(type, (payload: unknown) => handler(payload));
+  private bindHandler(room: Room, type: string, _handler: MessageHandler<unknown>): void {
+    let bound = this.boundHandlers.get(room);
+    if (!bound) {
+      bound = new Set();
+      this.boundHandlers.set(room, bound);
+    }
+    if (bound.has(type)) return;
+    bound.add(type);
+    room.onMessage(type, (payload: unknown) => this.handlers.get(type)?.(payload));
   }
 
   private scheduleReconnect(): void {

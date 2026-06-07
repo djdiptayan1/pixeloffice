@@ -179,7 +179,10 @@ async function start(opts: JoinSubmission): Promise<void> {
   // Register the WELCOME handler BEFORE connect so we never miss it. It is NOT
   // one-shot: the first welcome boots; every later (reconnect) welcome re-seeds.
   conn.on<WelcomePayload>(S2C.WELCOME, (welcome) => {
-    void boot(conn, welcome);
+    void boot(conn, welcome).catch((err) => {
+      conn.close();
+      login.showError(serverDownMessage(err));
+    });
   });
 
   conn.onError((code, message) => {
@@ -300,6 +303,9 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onChatFocus: (focused) => localGame.setInputLocked(focused),
     onLeaveGame: (gameId) => conn.send(C2S.LEAVE_GAME, { gameId }),
     onGameInput: (gameId, input) => conn.send(C2S.GAME_INPUT, { gameId, input }),
+    onLocate: (sessionId) => locate(sessionId),
+    onOpenProfile: (sessionId) => openProfile(sessionId),
+    isNpcHidden: () => readHideNpcs(),
   });
 
   const localHud = hud;

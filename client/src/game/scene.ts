@@ -121,6 +121,10 @@ export class OfficeScene extends Phaser.Scene {
   /** Furniture pieces that flip between base/alt textures for a glow flicker. */
   private flickerPieces: { img: Phaser.GameObjects.Image; kind: FurnitureKind }[] = [];
   private flickerOn = false;
+  private steamEmitters: Phaser.GameObjects.Particles.ParticleEmitter[] = [];
+  private reducedMotion = false;
+  private npcVisible = true;
+  private panResumeTimer?: Phaser.Time.TimerEvent;
   private keyE!: Phaser.Input.Keyboard.Key;
   private currentPromptGameId?: string;
 
@@ -654,6 +658,53 @@ export class OfficeScene extends Phaser.Scene {
     const a = this.avatars.get(sessionId);
     if (!a) return;
     this.setPresenceBadge(a, state);
+  }
+
+  apiPanToPlayer(sessionId: string): void {
+    const a = this.avatars.get(sessionId);
+    if (!a) return;
+    this.panResumeTimer?.remove();
+    this.panResumeTimer = undefined;
+    this.cameras.main.stopFollow();
+    this.cameras.main.pan(a.sprite.x, a.sprite.y, this.reducedMotion ? 0 : PAN_MS, "Sine.easeInOut");
+    this.panResumeTimer = this.time.delayedCall(PAN_RESUME_MS, () => this.resumeFollowSelf());
+  }
+
+  private resumeFollowSelf(): void {
+    this.panResumeTimer?.remove();
+    this.panResumeTimer = undefined;
+    const self = this.avatars.get(this.selfId);
+    if (!self) return;
+    this.cameras.main.startFollow(self.sprite, true, 0.15, 0.15);
+  }
+
+  apiSetZoom(zoom: number): void {
+    const next = Phaser.Math.Clamp(zoom, ZOOM_MIN, ZOOM_MAX);
+    if (this.reducedMotion) {
+      this.cameras.main.setZoom(next);
+      return;
+    }
+    this.tweens.add({
+      targets: this.cameras.main,
+      zoom: next,
+      duration: ZOOM_TWEEN_MS,
+      ease: "Sine.easeInOut",
+    });
+  }
+
+  apiSetNpcVisibility(visible: boolean): void {
+    this.npcVisible = visible;
+    for (const a of this.avatars.values()) {
+      if (a.snap.isNpc) this.applyAvatarVisibility(a, visible);
+    }
+  }
+
+  apiSetReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+    for (const emitter of this.steamEmitters) {
+      if (on) emitter.stop();
+      else emitter.start();
+    }
   }
 
   private setPresenceBadge(a: Avatar, state: PresenceState): void {

@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import {
+  type MeetingInfo,
   PRESENCE_META,
   PresenceState,
   areaAt,
@@ -65,6 +66,23 @@ function timeLeftLabel(endTime: number): string {
   return `${secs}s left`;
 }
 
+const TIME_FMT = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function timeLabel(epochMs: number): string {
+  return TIME_FMT.format(new Date(epochMs));
+}
+
+function durationLabel(startTime: number, endTime: number): string {
+  const mins = Math.max(1, Math.round((endTime - startTime) / 60000));
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
 export interface HudCallbacks {
   onSetStatus(state: SetStatusPayload["state"]): void;
   onJoinEvent(eventId: string): void;
@@ -76,6 +94,9 @@ export interface HudCallbacks {
   onChatFocus?(focused: boolean): void;
   onLeaveGame(gameId: string): void;
   onGameInput(gameId: string, input: any): void;
+  onLocate?(sessionId: string): void;
+  onOpenProfile?(sessionId: string): void;
+  isNpcHidden?(): boolean;
 }
 
 export interface HudHandle {
@@ -131,6 +152,8 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   const statusMenu = document.createElement("div");
   statusMenu.className = "hud-status-menu";
   statusMenu.hidden = true;
+  const statusNote = document.createElement("div");
+  statusNote.className = "hud-status-note";
   for (const s of STATUS_OPTIONS) {
     const meta = PRESENCE_META[PresenceState[s as keyof typeof PresenceState]];
     const item = document.createElement("button");
@@ -146,6 +169,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     });
     statusMenu.appendChild(item);
   }
+  statusMenu.appendChild(statusNote);
   statusPill.addEventListener("click", () => {
     statusMenu.hidden = !statusMenu.hidden;
   });
@@ -188,6 +212,15 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   rosterBody.className = "hud-panel-body";
   rosterPanel.append(rosterTitle, rosterBody);
 
+  const meetingsPanel = document.createElement("div");
+  meetingsPanel.className = "hud-panel hud-meetings";
+  const meetingsTitle = document.createElement("h2");
+  meetingsTitle.className = "hud-panel-title";
+  meetingsTitle.textContent = "Meetings";
+  const meetingsBody = document.createElement("div");
+  meetingsBody.className = "hud-panel-body";
+  meetingsPanel.append(meetingsTitle, meetingsBody);
+
   const eventsPanel = document.createElement("div");
   eventsPanel.className = "hud-panel hud-events";
   const eventsTitle = document.createElement("h2");
@@ -197,7 +230,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   eventsBody.className = "hud-panel-body";
   eventsPanel.append(eventsTitle, eventsBody);
 
-  sidebar.append(rosterPanel, eventsPanel);
+  sidebar.append(rosterPanel, meetingsPanel, eventsPanel);
 
   // --- Bottom-left chat ----------------------------------------------------
   const chatBar = document.createElement("div");
@@ -243,6 +276,54 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     caret.className = "hud-caret";
     caret.textContent = "▾";
     statusPill.append(dot, label, caret);
+    if (self?.source === "CALENDAR") {
+      statusNote.hidden = false;
+      statusNote.textContent = "Calendar meeting is controlling your status. Manual choices apply after it ends.";
+    } else if (self?.source === "EVENT") {
+      statusNote.hidden = false;
+      statusNote.textContent = "This status comes from an event you joined.";
+    } else {
+      statusNote.hidden = true;
+      statusNote.textContent = "";
+    }
+  }
+
+  function renderMeetingDetails(m: MeetingInfo | null): void {
+    meetingsBody.innerHTML = "";
+    if (!m) {
+      const empty = document.createElement("div");
+      empty.className = "hud-empty";
+      empty.textContent = "No active meeting.";
+      meetingsBody.appendChild(empty);
+      return;
+    }
+
+    const card = document.createElement("div");
+    card.className = "meeting-card";
+    const title = document.createElement("div");
+    title.className = "meeting-title";
+    title.textContent = m.title;
+    const details = document.createElement("div");
+    details.className = "meeting-details";
+    details.append(
+      detailRow("Start", timeLabel(m.startTime)),
+      detailRow("Duration", durationLabel(m.startTime, m.endTime)),
+      detailRow("Room", m.roomName),
+      detailRow("Invitees", m.participantIds.length === 0 ? "Everyone" : `${m.participantIds.length}`),
+    );
+    card.append(title, details);
+    meetingsBody.appendChild(card);
+  }
+
+  function detailRow(label: string, value: string): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "meeting-detail";
+    const k = document.createElement("span");
+    k.textContent = label;
+    const v = document.createElement("strong");
+    v.textContent = value;
+    row.append(k, v);
+    return row;
   }
 
   function renderMeeting(state: UiState): void {
@@ -456,6 +537,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     areaName.textContent = state.selfArea || "Hallway";
     renderStatusPill(self);
     renderMeeting(state);
+    renderMeetingDetails(state.myMeeting);
     renderRoster(state);
     renderEvents(state);
 

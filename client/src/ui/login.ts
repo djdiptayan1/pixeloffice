@@ -297,6 +297,7 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   const errorLine = document.createElement("div");
   errorLine.className = "login-error";
   errorLine.hidden = true;
+  let activeErrorLine = errorLine;
 
   // Submit button
   const submit = document.createElement("button");
@@ -408,6 +409,11 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   gtSubmit.className = "login-submit";
   gtSubmit.textContent = "Sign in with greytHR";
 
+  const setGreytHrBusy = (busy: boolean) => {
+    gtSubmit.disabled = busy;
+    gtSubmit.textContent = busy ? "Signing in\u2026" : "Sign in with greytHR";
+  };
+
   greytHrArea.append(gtTitle, gtIdLabel, gtPwLabel, gtError, gtSubmit);
 
   greytHrArea.addEventListener("submit", (e) => {
@@ -419,9 +425,9 @@ export function createLogin(opts: LoginOptions): LoginHandle {
       gtError.textContent = "Enter your Employee No and password.";
       return;
     }
+    activeErrorLine = gtError;
     gtError.hidden = true;
-    gtSubmit.disabled = true;
-    gtSubmit.textContent = "Signing in\u2026";
+    setGreytHrBusy(true);
     void (async () => {
       const result = await greytHrLogin({
         subdomain: greytHrSubdomain || undefined,
@@ -433,8 +439,7 @@ export function createLogin(opts: LoginOptions): LoginHandle {
       if ("error" in result) {
         gtError.hidden = false;
         gtError.textContent = result.error;
-        gtSubmit.disabled = false;
-        gtSubmit.textContent = "Sign in with greytHR";
+        setGreytHrBusy(false);
         return;
       }
       storeToken(result.token);
@@ -494,6 +499,7 @@ export function createLogin(opts: LoginOptions): LoginHandle {
       greytHrSubdomain = config!.greythr!.subdomain ?? "";
       greytHrArea.insertBefore(avatarBlock, gtSubmit);
       greytHrArea.hidden = false;
+      activeErrorLine = gtError;
       footer.textContent = "Sign in with your greytHR account";
       // Remove the guest form + divider (.login-form's display:flex overrides
       // [hidden], so .hidden alone won't hide it).
@@ -531,11 +537,13 @@ export function createLogin(opts: LoginOptions): LoginHandle {
     show() {
       root.style.display = "";
       setBusy(false);
+      setGreytHrBusy(false);
     },
     showError(message: string) {
-      errorLine.hidden = false;
-      errorLine.textContent = message;
+      activeErrorLine.hidden = false;
+      activeErrorLine.textContent = message;
       setBusy(false);
+      setGreytHrBusy(false);
     },
   };
 }
