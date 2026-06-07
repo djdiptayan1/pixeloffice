@@ -747,6 +747,42 @@ export class OfficeScene extends Phaser.Scene {
     });
   }
 
+  /** Pop an emoji bubble above an avatar; replaces any active one, fades after EMOTE_MS. */
+  apiShowEmote(sessionId: string, emote: string): void {
+    const a = this.avatars.get(sessionId);
+    if (!a) return;
+    a.emoteTimer?.remove();
+    a.emote?.destroy();
+
+    const glyph = EMOTE_EMOJI[emote as Emote] ?? emote;
+    const label = this.add.text(0, 0, glyph, {
+      fontFamily: '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif',
+      fontSize: "24px",
+    });
+    label.setOrigin(0.5, 0.5);
+    const pad = 6;
+    const size = Math.max(label.width, label.height) + pad * 2;
+    const bg = this.add.graphics();
+    bg.fillStyle(0x101620, 0.92);
+    bg.fillRoundedRect(-size / 2, -size / 2, size, size, 8);
+    bg.fillTriangle(-5, size / 2 - 1, 5, size / 2 - 1, 0, size / 2 + 6);
+
+    const container = this.add.container(a.sprite.x, a.sprite.y - TILE * 1.3, [bg, label]);
+    container.setDepth(DEPTH_OVERLAY + 2);
+    a.emote = container;
+
+    if (!this.reducedMotion) {
+      container.setScale(0.4);
+      this.tweens.add({ targets: container, scale: 1, duration: 220, ease: "Back.easeOut" });
+    }
+
+    a.emoteTimer = this.time.delayedCall(EMOTE_MS, () => {
+      container.destroy();
+      a.emote = undefined;
+      a.emoteTimer = undefined;
+    });
+  }
+
   /** Apply a profile change (name / department / avatar) to a player avatar. */
   apiUpdatePlayer(
     sessionId: string,

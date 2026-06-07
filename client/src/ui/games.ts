@@ -53,7 +53,7 @@ export function mountGameOverlay(
     }
   }
 
-  function setupPongInput(gameId: string, role: "player1" | "player2") {
+  function setupPongInput(gameId: string, _role: "player1" | "player2") {
     const handleKeyDown = (e: KeyboardEvent) => {
       let dir: "up" | "down" | null = null;
       if (e.key === "ArrowUp" || e.key === "w" || e.key === "W") {
