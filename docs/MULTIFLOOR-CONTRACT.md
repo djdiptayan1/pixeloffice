@@ -82,22 +82,36 @@ export const FLOOR_2_ID = "floor-2";
 export const DEFAULT_BUILDING_ID = "default";
 ```
 
-`buildDefaultBuilding()` seeds three floors:
-- **floors[0] "Ground Floor" (index 0)** — the EXACT current `buildOfficeMap()`
-  layout (deep-cloned), PLUS one elevator portal near reception at tile `(44,31)`
-  going up to `floor-1`. **This Ground floor is a placeholder the user redraws in
-  Map Studio.** A new `FurnitureKind` `"elevator"` (non-solid marker) was added
-  to render portal tiles.
-- **floors[1] "Floor 1" (index 1)** and **floors[2] "Floor 2" (index 2)** — fresh
-  48×34 layouts. Each has **four corner cabins** (7×6 rooms with a door, a table +
-  whiteboard, named `Cabin NW/NE/SW/SE`, each with walkable anchors), a central
-  department desk cluster (a `"<Floor> Floor"` DEPARTMENT area with 8 desks), a
-  small Coffee Area nook, and an elevator lobby near tile `(23–25, 27)`. Floor 1
-  links **down → ground** and **up → floor-2**; Floor 2 links **down → floor-1**
-  only (top floor, no upward portal).
+`buildDefaultBuilding()` seeds three floors. The RICH main office is the TOP
+floor so the **default spawn** lands a new player in the full office at a real
+desk. New players spawn on `SPAWN_FLOOR_ID` (= `FLOOR_2_ID`, the rich office):
+- **floors[0] "Ground Floor" (index 0)** — a LIGHT lobby/reception placeholder: a
+  bordered 48×34 hall with a Reception nook (reception-desk, sofa, plants,
+  door-mat) and ONE elevator near the centre going **up → floor-1**. No desks.
+  **This Ground floor is a placeholder the user redraws in Map Studio.** A
+  `FurnitureKind` `"elevator"` (non-solid marker) renders portal tiles.
+- **floors[1] "Floor 1" (index 1)** — a fresh 48×34 layout: **four corner cabins**
+  (7×6 rooms with a door, a table + whiteboard, named `Cabin NW/NE/SW/SE`, each
+  with walkable anchors), a central department desk cluster (a `"Floor 1 Floor"`
+  DEPARTMENT area with 8 desks), a small Coffee Area nook, and an elevator lobby
+  near tile `(23–25, 27)`. Links **down → ground** and **up → floor-2**.
+- **floors[2] "Floor 2" (index 2)** — the RICH main office: the EXACT current
+  `buildOfficeMap()` layout (deep-cloned — reception, Engineering/Product/Design/
+  HR departments with desks, Meeting Rooms A/B/C, Coffee Area, Lounge), PLUS one
+  elevator near reception at tile `(44,31)` going **down → floor-1**. Top floor,
+  no upward portal. This is the **default spawn floor** (`SPAWN_FLOOR_ID`) and the
+  floor whose geometry equals `buildOfficeMap()` (`MAIN_OFFICE_FLOOR_ID`).
 
-`buildOfficeMap()` (in `map.ts`) is UNCHANGED and still returns the single ground
-`OfficeMap`; `buildDefaultBuilding().floors[0]` is derived from it verbatim.
+`buildOfficeMap()` (in `map.ts`) is UNCHANGED and still returns the single rich
+`OfficeMap`; `buildDefaultBuilding().floors[2]` is derived from it verbatim, so
+legacy/test callers see the rich layout. New exports:
+`SPAWN_FLOOR_ID` / `MAIN_OFFICE_FLOOR_ID` (both `= FLOOR_2_ID`).
+
+**Lift lobbies:** every portal's `(toX,toY)` lands on a walkable, NON-portal tile
+ADJACENT (Manhattan ≤ 1) to the matching return portal on the destination floor,
+so a rider arrives next to the way back and never re-triggers a crossing. The
+server additionally de-stacks concurrent riders onto distinct free tiles near the
+portal target.
 
 ---
 
@@ -175,13 +189,16 @@ and their TOAST. A client therefore only ever hears about co-located players.
 
 **Meetings & events are per-floor.** An event/meeting belongs to the floor it was
 created on; admin-REST-created events/meetings (no floor field) default to the
-**ground floor** — preserving the legacy single-floor smoke/test behavior. A
+**main office floor** (`MAIN_OFFICE_FLOOR_ID` = Floor 2 — the rich layout that
+owns the Coffee Area / Lounge / Meeting Rooms) — preserving the legacy
+single-floor smoke/test behavior now that the rich office is the top floor. A
 player joins a meeting/event seated on its floor's map (meeting-room anchors fall
-back to the ground floor if the player's floor lacks that room).
+back to the main office floor if the player's floor lacks that room).
 
 **Exception:** `GAME_UPDATE` (lounge games: ping-pong / tic-tac-toe / connect-four)
-is still broadcast globally. Lounge games physically live only on the ground floor
-and are already keyed by `gameId`, so a non-ground client harmlessly ignores them.
+is still broadcast globally. Lounge games physically live only on the rich main
+office floor and are already keyed by `gameId`, so other-floor clients harmlessly
+ignore them.
 `MEETING_STARTED` / `MEETING_ENDED` remain participant-targeted (calendar-driven).
 
 ---

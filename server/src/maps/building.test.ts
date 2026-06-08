@@ -37,21 +37,25 @@ describe("buildDefaultBuilding seed", () => {
     expect(building.floors.map((f) => f.id)).toEqual([GROUND_FLOOR_ID, FLOOR_1_ID, FLOOR_2_ID]);
   });
 
-  it("ground floor preserves the exact legacy single-floor layout", () => {
-    const ground = floorById(building, GROUND_FLOOR_ID)!;
+  it("Floor 2 (top) preserves the exact rich legacy single-floor layout", () => {
+    // The RICH main office is now the TOP floor (Floor 2), the default spawn.
+    const main = floorById(building, FLOOR_2_ID)!;
     const legacy = buildOfficeMap();
-    expect(ground.width).toBe(legacy.width);
-    expect(ground.height).toBe(legacy.height);
-    expect(ground.desks).toEqual(legacy.desks);
-    expect(ground.areas).toEqual(legacy.areas);
-    expect(ground.anchors).toEqual(legacy.anchors);
-    expect(ground.spawn).toEqual(legacy.spawn);
+    expect(main.width).toBe(legacy.width);
+    expect(main.height).toBe(legacy.height);
+    expect(main.desks).toEqual(legacy.desks);
+    expect(main.areas).toEqual(legacy.areas);
+    expect(main.anchors).toEqual(legacy.anchors);
+    expect(main.spawn).toEqual(legacy.spawn);
     // Legacy collision grid must be byte-identical (so existing tests/smoke hold).
-    expect(ground.solid).toEqual(legacy.solid);
+    expect(main.solid).toEqual(legacy.solid);
   });
 
-  it("ground floor has an elevator portal up to floor-1 on a walkable tile", () => {
+  it("ground floor is a light lobby placeholder with an elevator up to floor-1", () => {
     const ground = floorById(building, GROUND_FLOOR_ID)!;
+    expect(ground.index).toBe(0);
+    // Placeholder: far fewer desks/areas than the rich office.
+    expect(ground.desks.length).toBe(0);
     expect(ground.portals.length).toBeGreaterThanOrEqual(1);
     const up = ground.portals.find((p) => p.toFloorId === FLOOR_1_ID)!;
     expect(up).toBeTruthy();
@@ -63,8 +67,20 @@ describe("buildDefaultBuilding seed", () => {
     expectWalkable(f1, up.toX, up.toY);
   });
 
-  for (const fid of [FLOOR_1_ID, FLOOR_2_ID]) {
-    describe(`upper floor ${fid}`, () => {
+  it("Floor 2 (rich) elevator only goes down to floor-1, on a walkable tile", () => {
+    const main = floorById(building, FLOOR_2_ID)!;
+    expect(main.portals.length).toBeGreaterThanOrEqual(1);
+    const down = main.portals.find((p) => p.toFloorId === FLOOR_1_ID)!;
+    expect(down).toBeTruthy();
+    expect(down.kind).toBe("elevator");
+    expectWalkable(main, down.x, down.y);
+    const f1 = floorById(building, FLOOR_1_ID)!;
+    expectWalkable(f1, down.toX, down.toY);
+  });
+
+  // Floor 1 is the only "fresh four-corner-cabins" upper floor now.
+  for (const fid of [FLOOR_1_ID]) {
+    describe(`cabins floor ${fid}`, () => {
       const floor = floorById(building, fid)!;
 
       it("is a fresh 48x34 floor", () => {
@@ -128,13 +144,39 @@ describe("buildDefaultBuilding seed", () => {
     expect(targets).toEqual([FLOOR_2_ID, GROUND_FLOOR_ID].sort());
   });
 
-  it("floor-2 elevator only goes down (to floor-1)", () => {
+  it("ground floor elevator only goes up (to floor-1)", () => {
+    const ground = floorById(building, GROUND_FLOOR_ID)!;
+    const targets = ground.portals.map((p) => p.toFloorId);
+    expect(targets).toContain(FLOOR_1_ID);
+    expect(targets).not.toContain(GROUND_FLOOR_ID);
+  });
+
+  it("floor-2 (top, rich office) elevator only goes down (to floor-1)", () => {
     const f2 = floorById(building, FLOOR_2_ID)!;
     const targets = f2.portals.map((p) => p.toFloorId);
     expect(targets).toContain(FLOOR_1_ID);
     expect(targets).not.toContain(FLOOR_2_ID);
     // No upward link from the top floor.
     expect(f2.portals.every((p) => p.toFloorId !== "floor-3")).toBe(true);
+  });
+
+  it("every portal lands beside the matching return portal (single lift lobby)", () => {
+    // Lift-lobby invariant (regression guard, finding #3): a rider arriving from
+    // floor A onto floor B must land ADJACENT (Manhattan <= 1) to the elevator
+    // that takes them back to A — never cross-map, never on a portal tile itself.
+    for (const floor of building.floors) {
+      for (const p of floor.portals) {
+        const target = floorById(building, p.toFloorId)!;
+        // The landing tile is walkable and NOT itself a portal (no re-trigger).
+        expectWalkable(target, p.toX, p.toY);
+        expect(portalAt(target, p.toX, p.toY)).toBeNull();
+        // The return portal back to `floor` must exist and be adjacent.
+        const back = target.portals.find((q) => q.toFloorId === floor.id);
+        expect(back).toBeTruthy();
+        const dist = Math.abs(back!.x - p.toX) + Math.abs(back!.y - p.toY);
+        expect(dist).toBeLessThanOrEqual(1);
+      }
+    }
   });
 
   it("portalAt resolves a portal tile and returns null elsewhere", () => {

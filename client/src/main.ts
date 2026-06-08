@@ -133,6 +133,10 @@ let mapStudio: MapStudioHandle | null = null;
 // a floor change does not block on the network. Refetched on each (re)boot.
 let activeBuilding: Building | null = null;
 let buildingFetch: Promise<Building | null> | null = null;
+// The floor geometry the minimap should draw. The WELCOME floor fetch may resolve
+// before the minimap is mounted, so we stash the resolved floor here and apply it
+// right after mountMinimap (and on every FLOOR_CHANGED).
+let pendingMinimapFloor: Floor | null = null;
 
 /** Fetch + parse the active building geometry once, caching the promise so
  *  concurrent callers (WELCOME + a quick FLOOR_CHANGED) share one request. */
@@ -271,6 +275,7 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   // may follow an admin map re-activation (new joins get the new active building).
   activeBuilding = null;
   buildingFetch = null;
+  pendingMinimapFloor = null;
 
   selfId = welcome.self.sessionId;
   const localStore = new Store(selfId);
@@ -361,6 +366,10 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     const floor = await floorGeometry(welcome.self.floorId ?? "ground");
     if (!floor || game !== localGame) return;
     localGame.setActiveFloor(floor, welcome.self, welcome.players);
+    // Point the minimap at the player's actual floor (it is created below, but
+    // may not exist yet if this resolves first — re-applied after mount too).
+    minimap?.setFloor(floor);
+    pendingMinimapFloor = floor;
   })();
 
   // Build the HUD now that we can wire its actions to the connection + game.
@@ -385,6 +394,11 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onLocate: (sessionId) => locate(sessionId),
     onOpenProfile: (sessionId) => openProfile(sessionId),
     isNpcHidden: () => readHideNpcs(),
+    // Camera-only "Find the elevator": pan to the nearest portal on the current
+    // floor. Never moves the avatar (human agency — the player walks in to ride).
+    onLocateElevator: () => {
+      game?.panToNearestPortal();
+    },
   });
 
   const localHud = hud;
@@ -419,11 +433,17 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   }
 
   // "Connect Google Calendar" widget self-hides if Google is not configured
-  // (status 404) — integrations are optional; the office is unaffected.
-  calendarConnect = mountCalendarConnect(hudRoot, {
-    fetchBase: serverHttpBase(),
-    getSessionId: liveSessionId,
-  });
+  // (status 404) — integrations are optional; the office is unaffected. Mount
+  // once and refresh on later reconnects (mirrors attendance/admin/settings) so
+  // a WELCOME re-seed never stacks duplicate widgets.
+  if (!calendarConnect) {
+    calendarConnect = mountCalendarConnect(hudRoot, {
+      fetchBase: serverHttpBase(),
+      getSessionId: liveSessionId,
+    });
+  } else {
+    void calendarConnect.refresh();
+  }
 
   // --- Round features: emote bar, profile card, minimap, settings, tour -----
 
@@ -445,6 +465,9 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onLocate: (sessionId) => locate(sessionId),
     isNpcHidden: () => readHideNpcs(),
   });
+  // If the WELCOME floor geometry already resolved (it loads concurrently above),
+  // point the freshly-mounted minimap at it so it never lingers on the ground map.
+  if (pendingMinimapFloor) minimap.setFloor(pendingMinimapFloor);
 
   // Settings popover + onboarding tour mount ONCE and persist across reconnects
   // (like admin). They read the LIVE game handle lazily through the `game` ref,
@@ -669,6 +692,10 @@ function registerBridge(conn: Connection): void {
       if (game !== localGame) return; // a reconnect re-booted under us
       if (floor) {
         localGame.setActiveFloor(floor, self, payload.players);
+        // Swap the minimap to the destination floor's geometry so it never shows
+        // the wrong floor after an elevator crossing.
+        minimap?.setFloor(floor);
+        pendingMinimapFloor = floor;
       }
     })();
   });

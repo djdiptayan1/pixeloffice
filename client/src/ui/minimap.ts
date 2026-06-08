@@ -44,6 +44,14 @@ export interface MinimapCallbacks {
 export interface MinimapHandle {
   /** Redraw from the current store snapshot (call on every store change). */
   render(): void;
+  /**
+   * Point the minimap at the geometry of the floor currently being rendered
+   * (areas/walls/dims). Call after WELCOME and on every FLOOR_CHANGED so the map
+   * always matches the floor the player is on — otherwise the minimap would draw
+   * the legacy ground layout on every floor. Recomputes scale/canvas size since
+   * floors can differ in dimensions. Passing null falls back to the ground map.
+   */
+  setFloor(floor: OfficeMap | null): void;
   destroy(): void;
 }
 
@@ -69,8 +77,14 @@ function writeCollapsed(v: boolean): void {
 }
 
 export function mountMinimap(parent: HTMLElement, store: Store, cb: MinimapCallbacks): MinimapHandle {
-  const scale = CANVAS_W / MAP.width; // px per tile
-  const canvasH = Math.round(MAP.height * scale);
+  // The geometry currently drawn. Defaults to the legacy ground map (back-compat
+  // / pre-multifloor); setFloor() swaps it to the player's current floor so the
+  // map and dots always match the floor being rendered. Both scale (px/tile) and
+  // the canvas height depend on the floor's dimensions, so they are recomputed
+  // whenever the floor changes.
+  let currentMap: OfficeMap = MAP;
+  let scale = CANVAS_W / currentMap.width; // px per tile
+  let canvasH = Math.round(currentMap.height * scale);
 
   const wrap = document.createElement("div");
   wrap.className = "minimap";
@@ -90,12 +104,18 @@ export function mountMinimap(parent: HTMLElement, store: Store, cb: MinimapCallb
   canvas.className = "minimap-canvas";
   // Render at devicePixelRatio for crisp dots, but lay out at CSS px.
   const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
-  canvas.width = Math.round(CANVAS_W * dpr);
-  canvas.height = Math.round(canvasH * dpr);
-  canvas.style.width = `${CANVAS_W}px`;
-  canvas.style.height = `${canvasH}px`;
   const ctx = canvas.getContext("2d");
-  if (ctx) ctx.scale(dpr, dpr);
+
+  /** Size the canvas (backing store + CSS) for the current floor's dimensions. */
+  function sizeCanvas(): void {
+    canvas.width = Math.round(CANVAS_W * dpr);
+    canvas.height = Math.round(canvasH * dpr);
+    canvas.style.width = `${CANVAS_W}px`;
+    canvas.style.height = `${canvasH}px`;
+    // setTransform (not scale) so repeated re-sizes don't compound the dpr scale.
+    if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  sizeCanvas();
 
   wrap.append(header, canvas);
   parent.appendChild(wrap);
@@ -121,13 +141,13 @@ export function mountMinimap(parent: HTMLElement, store: Store, cb: MinimapCallb
     c.fillStyle = BG_FILL;
     c.fillRect(0, 0, CANVAS_W, canvasH);
     // Area rects.
-    for (const a of MAP.areas) {
+    for (const a of currentMap.areas) {
       c.fillStyle = AREA_FILL[a.type] ?? "#1c2530";
       c.fillRect(a.x * scale, a.y * scale, a.w * scale, a.h * scale);
     }
     // Walls (dark) — drawn as small filled tiles.
     c.fillStyle = WALL_FILL;
-    for (const w of MAP.walls) {
+    for (const w of currentMap.walls) {
       c.fillRect(w.x * scale, w.y * scale, scale + 0.5, scale + 0.5);
     }
   }
@@ -196,6 +216,15 @@ export function mountMinimap(parent: HTMLElement, store: Store, cb: MinimapCallb
 
   return {
     render,
+    setFloor(floor: OfficeMap | null): void {
+      const next = floor ?? MAP;
+      if (next === currentMap) return;
+      currentMap = next;
+      scale = CANVAS_W / currentMap.width;
+      canvasH = Math.round(currentMap.height * scale);
+      sizeCanvas();
+      render();
+    },
     destroy(): void {
       wrap.remove();
     },

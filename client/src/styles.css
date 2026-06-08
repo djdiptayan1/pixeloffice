@@ -225,6 +225,9 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  /* Wrap rather than overflow when the bar is too narrow to fit logo + area +
+     floor widget + status + meeting buttons (e.g. <=768px). */
+  flex-wrap: wrap;
 }
 
 .hud-logo {
@@ -1020,6 +1023,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+/* `.login-form`'s display:flex would override the `hidden` attribute, leaving a
+   hidden form (e.g. the greytHR sign-in block when greytHR is disabled) visible
+   and clickable. Mirror the `.login-divider[hidden]` rule so hidden wins. */
+.login-form[hidden] {
+  display: none;
 }
 
 .login-label {
@@ -2406,6 +2415,23 @@ body {
   width: 100%;
 }
 
+/* Narrow viewports: condense the top bar so it fits without overflowing into
+   the sidebar. Drop the verbose area label, tighten gaps, and let the status /
+   meeting controls sit on their own wrapped row; push the sidebar top down so a
+   wrapped top bar never collides with the roster header. */
+@media (max-width: 820px) {
+  .hud-topbar {
+    gap: 8px;
+  }
+  .hud-area {
+    display: none;
+  }
+  .hud-sidebar {
+    top: 108px;
+    max-height: calc(100vh - 134px);
+  }
+}
+
 @media (max-width: 760px) {
   .pool-play {
     flex-direction: column;
@@ -2689,7 +2715,10 @@ body.reduced-motion *::after {
 
 .minimap {
   position: absolute;
-  right: 12px;
+  /* Live on the LEFT edge so it never overlaps the right-hand sidebar (which
+     also uses right:12px and would otherwise cover the bottom of the Meetings /
+     "Happening now" panels, worse at short viewports). */
+  left: 12px;
   bottom: 60px;
   width: 176px;
   background: linear-gradient(180deg, rgba(26, 33, 43, 0.96), rgba(20, 26, 34, 0.96));

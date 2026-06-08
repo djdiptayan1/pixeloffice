@@ -30,6 +30,13 @@ export interface OfficeGameHandle {
   showEmote(sessionId: string, emote: string): void;
   /** Smooth-pan the camera to an avatar, then resume following self. Never moves avatars. */
   panToPlayer(sessionId: string): void;
+  /**
+   * Smooth-pan the camera to the nearest elevator/portal on the CURRENT floor,
+   * then resume following self. Camera-only — never moves the avatar (the player
+   * must still walk into the elevator). No-op (returns false) on a floor with no
+   * portals.
+   */
+  panToNearestPortal(): boolean;
   /** Set the camera zoom (clamped to ZOOM_MIN..ZOOM_MAX) with a smooth tween. */
   setZoom(zoom: number): void;
   /** Show/hide every NPC avatar (sprite, shadow, tag, badge, bubbles). */
@@ -152,6 +159,9 @@ function makeHandle(game: Phaser.Game, scene: OfficeScene): OfficeGameHandle {
     },
     panToPlayer(sessionId) {
       scene.apiPanToPlayer(sessionId);
+    },
+    panToNearestPortal() {
+      return scene.apiPanToNearestPortal();
     },
     setZoom(zoom) {
       scene.apiSetZoom(zoom);

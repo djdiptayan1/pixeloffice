@@ -847,6 +847,39 @@ export class OfficeScene extends Phaser.Scene {
     this.panResumeTimer = this.time.delayedCall(PAN_RESUME_MS, () => this.resumeFollowSelf());
   }
 
+  /**
+   * Camera-only pan to the nearest portal (elevator) on the CURRENT floor, then
+   * resume following self. Never moves the avatar (human agency — the player
+   * still has to walk into the elevator themselves). No-op when this floor has
+   * no portals. Returns true if a portal was found and panned to.
+   */
+  apiPanToNearestPortal(): boolean {
+    if (this.portals.length === 0) return false;
+    const self = this.avatars.get(this.selfId);
+    const fromX = self?.snap.x ?? this.selfStart.x;
+    const fromY = self?.snap.y ?? this.selfStart.y;
+    let nearest = this.portals[0];
+    let best = Infinity;
+    for (const p of this.portals) {
+      const d = Math.abs(p.x - fromX) + Math.abs(p.y - fromY);
+      if (d < best) {
+        best = d;
+        nearest = p;
+      }
+    }
+    this.panResumeTimer?.remove();
+    this.panResumeTimer = undefined;
+    this.cameras.main.stopFollow();
+    this.cameras.main.pan(
+      nearest.x * TILE + TILE / 2,
+      nearest.y * TILE + TILE / 2,
+      this.reducedMotion ? 0 : PAN_MS,
+      "Sine.easeInOut",
+    );
+    this.panResumeTimer = this.time.delayedCall(PAN_RESUME_MS, () => this.resumeFollowSelf());
+    return true;
+  }
+
   private resumeFollowSelf(): void {
     this.panResumeTimer?.remove();
     this.panResumeTimer = undefined;

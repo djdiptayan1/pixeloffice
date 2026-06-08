@@ -141,9 +141,14 @@ async function main(): Promise<void> {
   );
 
   // HR / GreytHR routes. Resolves a live sessionId -> the user behind it so the
-  // client can never act for someone else. Uses the mock adapter unless GreytHR
-  // env is set; the client widget self-hides when status 404s.
-  app.use(
+  // client can never act for someone else. ONLY mounted when greytHR is actually
+  // configured (GREYTHR_LOGIN_ENABLED). In zero-config dev there is no HR backend
+  // (no mock adapter exists), so leaving /api/hr unmounted makes GET /api/hr/status
+  // fall through to the /api 404 catch-all — which is exactly the signal the client
+  // attendance widget self-hides on (404/!ok), instead of showing a check-in
+  // button that 502s on every press.
+  if (container.hrConfigured)
+    app.use(
     "/api/hr",
     createHrRouter({
       attendance: container.attendance,

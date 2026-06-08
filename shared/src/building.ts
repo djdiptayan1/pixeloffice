@@ -113,20 +113,42 @@ export const FLOOR_1_ID = "floor-1";
 export const FLOOR_2_ID = "floor-2";
 export const DEFAULT_BUILDING_ID = "default";
 
-/** Elevator tile on the Ground floor (near reception) that goes UP to floor-1. */
-const GROUND_ELEVATOR: TilePos = { x: 44, y: 31 };
+/**
+ * The floor a NEW player spawns on by default. This is the RICH main office
+ * (the full reception + departments + meeting rooms + coffee + lounge layout
+ * derived verbatim from buildOfficeMap()), now the TOP floor (Floor 2). The
+ * default experience still lands the user in the full office at a real desk.
+ */
+export const SPAWN_FLOOR_ID = FLOOR_2_ID;
+
+/**
+ * The floor whose geometry is exactly buildOfficeMap() (the rich main office).
+ * Legacy/test callers that use buildOfficeMap() see this floor's layout; the
+ * server reuses its shared NPC engine (built on buildOfficeMap) for this floor.
+ */
+export const MAIN_OFFICE_FLOOR_ID = FLOOR_2_ID;
+
+/** Elevator tile on the rich main office (Floor 2), near reception, going DOWN. */
+const MAIN_OFFICE_ELEVATOR: TilePos = { x: 44, y: 31 };
 
 let cachedBuilding: Building | null = null;
 
 /**
- * Seed the default 3-floor building.
- *  - floors[0] "Ground Floor": the EXACT current buildOfficeMap() layout, plus
- *    a single elevator near reception that goes up to floor-1. (Placeholder the
- *    user redraws in Map Studio — see MULTIFLOOR-CONTRACT.md.)
- *  - floors[1] "Floor 1": fresh 48x34 — four corner cabins, central desks,
- *    coffee nook, elevator down to ground + up to floor-2.
- *  - floors[2] "Floor 2": fresh 48x34 — four corner cabins, central desks,
- *    coffee nook, elevator down to floor-1 only.
+ * Seed the default 3-floor building. The RICH main office is the TOP floor so
+ * the default spawn (SPAWN_FLOOR_ID) lands a new player in the full office:
+ *  - floors[0] "Ground Floor" (index 0): a LIGHT lobby/reception placeholder —
+ *    a bordered hall with a reception nook + one elevator up to floor-1. (A
+ *    placeholder the user redraws in Map Studio — see MULTIFLOOR-CONTRACT.md.)
+ *  - floors[1] "Floor 1" (index 1): fresh 48x34 — four corner cabins, central
+ *    desks, coffee nook, elevator down to ground + up to floor-2.
+ *  - floors[2] "Floor 2" (index 2): the RICH main office (buildOfficeMap()
+ *    layout, deep-cloned), plus one elevator near reception that goes DOWN to
+ *    floor-1. Top floor — no upward portal.
+ *
+ * Elevators form a single lift lobby per crossing: every portal's (toX,toY)
+ * lands on a walkable tile ADJACENT to the matching return portal on the
+ * destination floor (never on the portal tile itself), so a rider arrives next
+ * to the way back and never immediately re-triggers a portal.
  */
 export function buildDefaultBuilding(): Building {
   if (cachedBuilding) return cachedBuilding;
@@ -137,34 +159,35 @@ export function buildDefaultBuilding(): Building {
     name: "Floor 1",
     index: 1,
     downToFloorId: GROUND_FLOOR_ID,
-    downToTile: { x: GROUND_ELEVATOR.x, y: GROUND_ELEVATOR.y - 1 }, // beside ground elevator
+    // Patched below to land beside the ground elevator (lift lobby).
+    downToTile: null,
     upToFloorId: FLOOR_2_ID,
   });
-  const floor2 = buildUpperFloor({
-    id: FLOOR_2_ID,
-    name: "Floor 2",
-    index: 2,
-    downToFloorId: FLOOR_1_ID,
-    // filled in after floor1's elevator tile is known (see below).
-    downToTile: null,
-    upToFloorId: null,
-  });
+  const floor2 = buildMainOfficeFloor();
 
-  // Resolve floor-2's "down" target to land NEXT TO floor-1's elevator tile so
-  // a player arriving from above does not immediately re-trigger the portal.
-  const f1Elevator = floor1.portals.find((p) => p.kind === "elevator")!;
-  for (const p of floor2.portals) {
-    if (p.toFloorId === FLOOR_1_ID) {
-      p.toX = f1Elevator.x;
-      p.toY = f1Elevator.y + 1; // tile just below floor-1's elevator (walkable)
-    }
-  }
-  // And floor-1's "up" target lands next to floor-2's elevator.
-  const f2Elevator = floor2.portals.find((p) => p.kind === "elevator")!;
-  for (const p of floor1.portals) {
-    if (p.toFloorId === FLOOR_2_ID) {
-      p.toX = f2Elevator.x;
-      p.toY = f2Elevator.y + 1;
+  const floorsById = new Map<string, Floor>([
+    [ground.id, ground],
+    [floor1.id, floor1],
+    [floor2.id, floor2],
+  ]);
+
+  // --- Wire every inter-floor portal into a shared lift lobby ---------------
+  // For each portal, land the rider on a walkable tile ADJACENT to the matching
+  // RETURN portal on the destination floor (the elevator the rider would take
+  // back), never on the portal tile itself. Also give the portal a friendly
+  // label using the destination floor's display name.
+  for (const floor of [ground, floor1, floor2]) {
+    for (const p of floor.portals) {
+      const target = floorsById.get(p.toFloorId);
+      if (!target) continue;
+      // The return portal on the destination floor that comes back to `floor`.
+      const back = target.portals.find((q) => q.toFloorId === floor.id);
+      const anchor: TilePos = back
+        ? landingBeside(target, back.x, back.y)
+        : landingBeside(target, target.spawn.x, target.spawn.y);
+      p.toX = anchor.x;
+      p.toY = anchor.y;
+      p.label = `Elevator ${p.label?.includes("↓") ? "↓" : "↑"} ${target.name}`;
     }
   }
 
@@ -177,17 +200,58 @@ export function buildDefaultBuilding(): Building {
 }
 
 /**
- * Ground floor = the current single OfficeMap, deep-cloned (so callers can never
- * mutate the buildOfficeMap() cache through the building), plus floor identity
- * and one elevator portal up to floor-1.
+ * Pick a walkable tile adjacent to (x,y) on `floor` (the lift-lobby landing).
+ * Prefers the tile directly below, then the four neighbours, then a small ring
+ * scan — guaranteeing the result is walkable and NOT (x,y) itself so a rider
+ * never lands on the portal tile and re-triggers a crossing.
  */
-function buildGroundFloor(): Floor {
+function landingBeside(floor: Floor, x: number, y: number): TilePos {
+  const candidates: TilePos[] = [
+    { x, y: y + 1 },
+    { x, y: y - 1 },
+    { x: x - 1, y },
+    { x: x + 1, y },
+    { x: x - 1, y: y + 1 },
+    { x: x + 1, y: y + 1 },
+    { x: x - 1, y: y - 1 },
+    { x: x + 1, y: y - 1 },
+  ];
+  for (const c of candidates) {
+    if (
+      c.x >= 0 &&
+      c.y >= 0 &&
+      c.x < floor.width &&
+      c.y < floor.height &&
+      floor.solid[c.y][c.x] !== true &&
+      portalAt(floor, c.x, c.y) === null
+    ) {
+      return c;
+    }
+  }
+  // Fallback: a guaranteed-walkable non-portal tile anywhere on the floor.
+  for (let sy = 1; sy < floor.height - 1; sy++) {
+    for (let sx = 1; sx < floor.width - 1; sx++) {
+      if (floor.solid[sy][sx] !== true && portalAt(floor, sx, sy) === null) {
+        return { x: sx, y: sy };
+      }
+    }
+  }
+  return { x: floor.spawn.x, y: floor.spawn.y };
+}
+
+/**
+ * The RICH main office floor (Floor 2) = the current single OfficeMap,
+ * deep-cloned (so callers can never mutate the buildOfficeMap() cache through
+ * the building), plus floor identity and one elevator portal DOWN to floor-1.
+ * This is the top floor and the default spawn floor.
+ */
+function buildMainOfficeFloor(): Floor {
   const base = cloneOfficeMap(buildOfficeMap());
 
-  // The elevator tile must be walkable on the ground floor so the player can
-  // step onto it. It sits in Reception (already an open, walkable area).
-  const ex = GROUND_ELEVATOR.x;
-  const ey = GROUND_ELEVATOR.y;
+  // The elevator tile must be walkable so the player can step onto it. It sits
+  // in Reception (already an open, walkable area on the rich map).
+  const ex = MAIN_OFFICE_ELEVATOR.x;
+  const ey = MAIN_OFFICE_ELEVATOR.y;
   // Render an elevator marker. Keep it NON-solid (it is a walkable portal tile).
   base.furniture.push({ kind: "elevator", x: ex, y: ey, w: 1, h: 1, solid: false });
 
@@ -197,16 +261,108 @@ function buildGroundFloor(): Floor {
       y: ey,
       kind: "elevator",
       toFloorId: FLOOR_1_ID,
-      // toX/toY are patched in buildDefaultBuilding() to land beside floor-1's
-      // elevator; a sane default in case this floor is used standalone.
+      // toX/toY are patched in buildDefaultBuilding() into the floor-1 lift lobby.
       toX: ex,
       toY: ey,
-      label: "Elevator ↑ Floor 1",
+      label: "Elevator ↓ Floor 1",
     },
   ];
 
   return {
     ...base,
+    id: FLOOR_2_ID,
+    name: "Floor 2",
+    index: 2,
+    portals,
+  };
+}
+
+/**
+ * The light Ground floor placeholder (index 0): a bordered 48x34 hall with a
+ * reception nook and a single elevator up to floor-1. Deliberately sparse — the
+ * user redraws this in Map Studio (see MULTIFLOOR-CONTRACT.md). The rich office
+ * now lives on Floor 2 (the top floor / default spawn).
+ */
+function buildGroundFloor(): Floor {
+  const width = MAP_W;
+  const height = MAP_H;
+
+  const areas: Area[] = [];
+  const furniture: Furniture[] = [];
+  const walls: TilePos[] = [];
+  const anchors: Record<string, TilePos[]> = {};
+
+  // Outer border (solid). Like the upper floors.
+  for (let x = 0; x < width; x++) {
+    walls.push({ x, y: 0 }, { x, y: height - 1 });
+  }
+  for (let y = 1; y < height - 1; y++) {
+    walls.push({ x: 0, y }, { x: width - 1, y });
+  }
+
+  // A reception nook along the bottom-center so the lobby reads as an entrance.
+  const reception: Area = { name: "Reception", type: "RECEPTION", x: 17, y: 28, w: 30, h: 5 };
+  areas.push(reception);
+  furniture.push({ kind: "reception-desk", x: 28, y: 29, w: 4, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 18, y: 29, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 45, y: 29, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "door-mat", x: 23, y: 32, w: 2, h: 1, solid: false });
+  furniture.push({ kind: "sofa", x: 20, y: 29, w: 3, h: 1, solid: true });
+  anchors["Reception"] = [
+    { x: 22, y: 31 },
+    { x: 24, y: 31 },
+    { x: 26, y: 31 },
+    { x: 28, y: 31 },
+    { x: 30, y: 31 },
+    { x: 32, y: 31 },
+  ];
+
+  // A single elevator near the center of the lobby, going UP to floor-1.
+  const elevX = 24;
+  const elevY = 18;
+  furniture.push({ kind: "elevator", x: elevX, y: elevY, w: 1, h: 1, solid: false });
+  const portals: Portal[] = [
+    {
+      x: elevX,
+      y: elevY,
+      kind: "elevator",
+      toFloorId: FLOOR_1_ID,
+      // Patched in buildDefaultBuilding() into the floor-1 lift lobby.
+      toX: elevX,
+      toY: elevY + 1,
+      label: "Elevator ↑ Floor 1",
+    },
+  ];
+
+  // Collision grid.
+  const solid: boolean[][] = Array.from({ length: height }, () => Array<boolean>(width).fill(false));
+  for (const w of walls) solid[w.y][w.x] = true;
+  for (const f of furniture) {
+    if (!f.solid) continue;
+    for (let dy = 0; dy < f.h; dy++) {
+      for (let dx = 0; dx < f.w; dx++) {
+        solid[f.y + dy][f.x + dx] = true;
+      }
+    }
+  }
+
+  // Spawn: an open lobby tile just below the elevator (walkable).
+  const spawn = firstWalkable(solid, width, height, [
+    { x: elevX, y: elevY + 1 },
+    { x: elevX + 1, y: elevY + 1 },
+    { x: 24, y: 24 },
+  ]);
+
+  return {
+    width,
+    height,
+    areas,
+    desks: [],
+    furniture,
+    walls,
+    solid,
+    anchors,
+    spawn,
     id: GROUND_FLOOR_ID,
     name: "Ground Floor",
     index: 0,

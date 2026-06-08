@@ -12,7 +12,8 @@
 //
 // Everything env-driven is OPT-IN. With NO env vars set the container resolves
 // to the exact zero-config MVP behavior: dev auth, in-memory user repo,
-// in-memory presence store, mock calendar, mock GreytHR. Real auth providers /
+// in-memory presence store, mock calendar, and NO HR backend (the attendance
+// routes are only mounted when greytHR is configured). Real auth providers /
 // JWT / Postgres / Redis / GreytHR activate only when their env config is
 // present, and a configured-but-unreachable datastore degrades to in-memory
 // instead of crashing (plan Principle 4: integrations are optional).
@@ -231,7 +232,11 @@ export const container = {
   greytHrAuth: greytHrAuthService,
   /** greytHR login config (null when disabled); carries the form subdomain. */
   greytHrLoginConfig,
-  /** HR adapter + attendance service (mock unless GreytHR env is set). */
+  /**
+   * HR adapter + attendance service (greytHR ESS). NOTE: there is no mock HR
+   * adapter — the /api/hr routes are mounted only when `hrConfigured` is true
+   * (GREYTHR_LOGIN_ENABLED). In zero-config dev HR is simply absent.
+   */
   hr,
   attendance,
   /** greytHR ESS portal deep link, or undefined when not configured. */

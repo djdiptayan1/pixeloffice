@@ -23,6 +23,8 @@ import {
   S2C,
   AVATAR_IDS,
   DEPARTMENTS,
+  MAIN_OFFICE_FLOOR_ID,
+  SPAWN_FLOOR_ID,
   anchorFor,
   isWalkable,
   portalAt,
@@ -123,9 +125,30 @@ export class OfficeRoom extends Room {
   private readonly floors = new Map<string, Floor>(
     this.building.floors.map((f) => [f.id, f]),
   );
-  /** The ground floor id — default spawn floor + the legacy single-floor target. */
+  /**
+   * The ground floor id (index 0). The DEFAULT floor for an absent snapshot
+   * floorId (contract: absent => "ground"), for admin-REST events without a
+   * floor, and the target of floor-scoped fallbacks. NOTE: this is NOT where new
+   * players spawn — that is `spawnFloorId` (the rich main office, now Floor 2).
+   */
   private readonly groundFloorId: string =
     (this.building.floors.find((f) => f.index === 0) ?? this.building.floors[0]).id;
+  /**
+   * The floor a NEW player spawns on (the rich main office — Floor 2 in the
+   * default building, exported as SPAWN_FLOOR_ID). Falls back to the ground floor
+   * for custom buildings that lack that floor id.
+   */
+  private readonly spawnFloorId: string = this.floors.has(SPAWN_FLOOR_ID)
+    ? SPAWN_FLOOR_ID
+    : this.groundFloorId;
+  /**
+   * The floor whose geometry is exactly buildOfficeMap() (the rich main office),
+   * which reuses the SHARED container NPC engine (built on buildOfficeMap). Falls
+   * back to the ground floor for custom buildings lacking that floor id.
+   */
+  private readonly mainOfficeFloorId: string = this.floors.has(MAIN_OFFICE_FLOOR_ID)
+    ? MAIN_OFFICE_FLOOR_ID
+    : this.groundFloorId;
   /** Per-floor ambient NPC engines (each seeded from that floor's geometry). */
   private readonly npcByFloor = new Map<string, NpcService>();
   /** Reverse index: NPC sessionId -> floorId (NPCs never change floors). */
@@ -269,22 +292,22 @@ export class OfficeRoom extends Room {
     // They are server-driven ambience: never join meetings, never touch HR,
     // never respond to humans, and never change floors.
     //
-    // The ground floor reuses the SHARED container NPC engine (built on the
-    // legacy ground geometry) so its existing behavior/tests are unchanged.
-    // Upper floors get fresh per-floor engines (distinct sessionIds via a
-    // floor-id prefix so they never collide across floors).
+    // The MAIN OFFICE floor (the rich buildOfficeMap layout) reuses the SHARED
+    // container NPC engine (built on that exact geometry) so its existing
+    // behavior/tests are unchanged. Other floors get fresh per-floor engines
+    // (distinct sessionIds via a floor-id prefix so they never collide).
     const npcCfg = npcConfigFromEnv(process.env);
     const now0 = Date.now();
     for (const floor of this.building.floors) {
       let engine: NpcService;
-      if (floor.id === this.groundFloorId) {
-        engine = container.npcs; // shared engine = legacy ground behavior
+      if (floor.id === this.mainOfficeFloorId) {
+        engine = container.npcs; // shared engine = legacy rich-office behavior
       } else {
         engine = new NpcService(floor, mulberry32(npcCfg.seed + floor.index), npcCfg.count);
       }
       this.npcByFloor.set(floor.id, engine);
       for (const snap of engine.spawnAll(now0)) {
-        const id = floor.id === this.groundFloorId ? snap.sessionId : `${floor.id}:${snap.sessionId}`;
+        const id = floor.id === this.mainOfficeFloorId ? snap.sessionId : `${floor.id}:${snap.sessionId}`;
         const placed: PlayerSnapshot = { ...snap, sessionId: id, floorId: floor.id };
         this.players.set(id, placed);
         this.npcFloor.set(id, floor.id);
@@ -313,11 +336,11 @@ export class OfficeRoom extends Room {
    * every connected human should see them move/change presence/chat.
    */
   private applyNpcEffects(effects: NpcEffect[], floorId: string): void {
-    // The ground floor uses the shared engine whose sessionIds are stored as-is;
-    // upper floors prefix the engine sessionId with "<floorId>:". Resolve the
-    // authoritative key the same way it was inserted in onCreate.
+    // The main office floor uses the shared engine whose sessionIds are stored
+    // as-is; other floors prefix the engine sessionId with "<floorId>:". Resolve
+    // the authoritative key the same way it was inserted in onCreate.
     const keyFor = (engineSessionId: string): string =>
-      floorId === this.groundFloorId ? engineSessionId : `${floorId}:${engineSessionId}`;
+      floorId === this.mainOfficeFloorId ? engineSessionId : `${floorId}:${engineSessionId}`;
 
     for (const effect of effects) {
       const sessionId = keyFor(effect.sessionId);
@@ -420,9 +443,11 @@ export class OfficeRoom extends Room {
 
     this.onEventCreated = (event: SocialEvent) => {
       // Events are per-floor. Admin REST creates them without a floor, so they
-      // belong to the ground floor (legacy single-floor behavior). The event's
-      // areaName must match an area on that floor's map for anchors to resolve.
-      const floorId = this.eventFloor.get(event.id) ?? this.groundFloorId;
+      // belong to the MAIN OFFICE floor (the rich layout that owns Coffee Area /
+      // Lounge / Meeting Rooms) — preserving the legacy single-floor behavior now
+      // that the rich office is Floor 2. The event's areaName must match an area
+      // on that floor's map for anchors to resolve.
+      const floorId = this.eventFloor.get(event.id) ?? this.mainOfficeFloorId;
       this.eventFloor.set(event.id, floorId);
       log.info("social event created", { type: event.type, title: event.title, area: event.areaName, floorId });
       this.broadcastToFloor(floorId, S2C.EVENT_CREATED, { event });
@@ -435,13 +460,13 @@ export class OfficeRoom extends Room {
     events.on("created", this.onEventCreated);
 
     this.onEventUpdated = (event: SocialEvent) => {
-      const floorId = this.eventFloor.get(event.id) ?? this.groundFloorId;
+      const floorId = this.eventFloor.get(event.id) ?? this.mainOfficeFloorId;
       this.broadcastToFloor(floorId, S2C.EVENT_UPDATED, { event });
     };
     events.on("updated", this.onEventUpdated);
 
     this.onEventEnded = (eventId: string) => {
-      const floorId = this.eventFloor.get(eventId) ?? this.groundFloorId;
+      const floorId = this.eventFloor.get(eventId) ?? this.mainOfficeFloorId;
       this.eventFloor.delete(eventId);
       this.broadcastToFloor(floorId, S2C.EVENT_ENDED, { eventId });
       // Presence recomputes on the next tick once participants are gone; force
@@ -483,9 +508,10 @@ export class OfficeRoom extends Room {
       avatarId: identity.avatarId,
     });
 
-    // New joiners always spawn on the ground floor at a free desk seat (as today).
-    const groundFloor = this.floors.get(this.groundFloorId)!;
-    const seat = this.assignSpawn(groundFloor, identity.department);
+    // New joiners spawn on the rich MAIN OFFICE floor (Floor 2) at a free desk
+    // seat, so the default experience lands in the full office at a real desk.
+    const spawnFloor = this.floors.get(this.spawnFloorId)!;
+    const seat = this.assignSpawn(spawnFloor, identity.department);
     this.homeSeat.set(client.sessionId, seat);
     this.sessionUser.set(client.sessionId, identity.userId);
     // Floor sync is OPT-IN and OFF by default. `place` stays absent on the
@@ -509,7 +535,7 @@ export class OfficeRoom extends Room {
       dir: "down",
       presence: PresenceState.AVAILABLE, // resolved immediately below
       source: "SYSTEM",
-      floorId: this.groundFloorId,
+      floorId: this.spawnFloorId,
     };
 
     // Insert the snapshot BEFORE the immediate tick: the tick fires the shared
@@ -540,9 +566,9 @@ export class OfficeRoom extends Room {
 
     const welcome: WelcomePayload = {
       self: { ...snapshot },
-      // Floor-scoped: only co-located players (the joiner spawns on ground).
-      players: this.othersOnFloor(client.sessionId, this.groundFloorId),
-      events: this.activeEventsOnFloor(this.groundFloorId, now),
+      // Floor-scoped: only co-located players (the joiner spawns on the main office).
+      players: this.othersOnFloor(client.sessionId, this.spawnFloorId),
+      events: this.activeEventsOnFloor(this.spawnFloorId, now),
       meeting: currentMeeting,
       building: this.buildingSummary(),
     };
@@ -561,7 +587,7 @@ export class OfficeRoom extends Room {
 
     // Tell everyone ELSE ON THIS FLOOR the player joined (carries presence).
     const joined: PlayerJoinedPayload = { player: { ...snapshot } };
-    this.broadcastToFloorExcept(client, this.groundFloorId, S2C.PLAYER_JOINED, joined);
+    this.broadcastToFloorExcept(client, this.spawnFloorId, S2C.PLAYER_JOINED, joined);
 
     // Join complete: subsequent presence changes for this session broadcast.
     this.joining.delete(client.sessionId);
@@ -715,7 +741,12 @@ export class OfficeRoom extends Room {
       // see the avatar reach the portal tile, then perform the crossing.
       const moved: PlayerMovedPayload = { sessionId: client.sessionId, x, y, dir, moving: false };
       this.broadcastToFloorExcept(client, floorId, S2C.PLAYER_MOVED, moved);
-      this.changeFloor(client, snap, floorId, portal.toFloorId, portal.toX, portal.toY, dir);
+      // Resolve a FREE landing tile near the portal target so concurrent riders
+      // do not stack on the identical arrival tile (occupancy-aware, scoped to
+      // the destination floor — mirrors assignSpawn / the consented-move path).
+      const dest = this.floors.get(portal.toFloorId)!;
+      const land = this.freeTileNear(dest, portal.toX, portal.toY);
+      this.changeFloor(client, snap, floorId, portal.toFloorId, land.x, land.y, dir);
       return;
     }
 
@@ -952,8 +983,8 @@ export class OfficeRoom extends Room {
     // Seat the player on the floor the event belongs to. They must already be on
     // that floor (the client only shows events for the floor it is rendering).
     const snap = this.players.get(client.sessionId);
-    const floorId = this.eventFloor.get(eventId) ?? snap?.floorId ?? this.groundFloorId;
-    const map = this.floors.get(floorId) ?? this.floors.get(this.groundFloorId)!;
+    const floorId = this.eventFloor.get(eventId) ?? snap?.floorId ?? this.mainOfficeFloorId;
+    const map = this.floors.get(floorId) ?? this.floors.get(this.mainOfficeFloorId)!;
     const anchor = anchorFor(map, result.event.areaName, result.anchorIndex);
     this.teleport(client.sessionId, anchor.x, anchor.y);
 
@@ -999,12 +1030,13 @@ export class OfficeRoom extends Room {
     // re-join; freed slots are reused without colliding with an occupant). The
     // meeting room is seated on the player's CURRENT floor (meetings are
     // per-floor; the meeting room name resolves against that floor's anchors,
-    // falling back to the ground floor if the player's floor lacks the room).
+    // falling back to the MAIN OFFICE floor — which owns the named meeting rooms
+    // — if the player's floor lacks the room).
     const snap = this.players.get(client.sessionId);
-    const floorId = snap?.floorId ?? this.groundFloorId;
-    let map = this.floors.get(floorId) ?? this.floors.get(this.groundFloorId)!;
+    const floorId = snap?.floorId ?? this.spawnFloorId;
+    let map = this.floors.get(floorId) ?? this.floors.get(this.mainOfficeFloorId)!;
     if (!map.anchors[meeting.roomName]) {
-      map = this.floors.get(this.groundFloorId)!;
+      map = this.floors.get(this.mainOfficeFloorId)!;
     }
     const seatIndex = this.meetingSlots.assign(meeting.id, client.sessionId);
     const anchor = anchorFor(map, meeting.roomName, seatIndex);
@@ -1027,15 +1059,16 @@ export class OfficeRoom extends Room {
     const seat = this.homeSeat.get(client.sessionId);
     if (!seat) return;
     const snap = this.players.get(client.sessionId);
-    // The home seat is on the ground floor. If the player wandered to another
-    // floor, returning them to their desk also returns them to the ground floor.
-    if (snap && (snap.floorId ?? this.groundFloorId) !== this.groundFloorId) {
-      this.changeFloor(client, snap, snap.floorId ?? this.groundFloorId, this.groundFloorId, seat.x, seat.y, "down");
+    // The home seat is a desk on the MAIN OFFICE floor (where the player spawned).
+    // If the player wandered to another floor, returning them to their desk also
+    // returns them to the main office floor (via the same floor-change machinery).
+    if (snap && (snap.floorId ?? this.groundFloorId) !== this.spawnFloorId) {
+      this.changeFloor(client, snap, snap.floorId ?? this.groundFloorId, this.spawnFloorId, seat.x, seat.y, "down");
       return;
     }
     this.teleport(client.sessionId, seat.x, seat.y);
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: seat.x, y: seat.y };
-    this.broadcastToFloor(this.groundFloorId, S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(this.spawnFloorId, S2C.PLAYER_TELEPORTED, tp);
   }
 
   // -------------------------------------------------------------------------
@@ -1083,6 +1116,39 @@ export class OfficeRoom extends Room {
     return { x: sx, y: sy };
   }
 
+  /**
+   * Resolve a FREE, walkable, NON-portal landing tile near (seedX,seedY) on
+   * `map`, de-stacking concurrent arrivals. Occupancy is scoped to players ON
+   * THAT FLOOR. Used by the elevator path so two riders crossing onto the same
+   * portal target do not overlap (mirrors assignSpawn's ring-scan). Portal tiles
+   * are skipped so a deposited rider never immediately re-triggers a crossing.
+   */
+  private freeTileNear(map: Floor, seedX: number, seedY: number): { x: number; y: number } {
+    const occupied = new Set<string>();
+    for (const p of this.players.values()) {
+      if ((p.floorId ?? this.groundFloorId) !== map.id) continue;
+      occupied.add(`${p.x},${p.y}`);
+    }
+    const usable = (x: number, y: number): boolean =>
+      isWalkable(map, x, y) &&
+      !occupied.has(`${x},${y}`) &&
+      portalAt(map, x, y) === null;
+
+    if (usable(seedX, seedY)) return { x: seedX, y: seedY };
+    for (let r = 1; r < Math.max(map.width, map.height); r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = seedX + dx;
+          const y = seedY + dy;
+          if (usable(x, y)) return { x, y };
+        }
+      }
+    }
+    // Last resort (no free non-portal tile): the seed tile as-is.
+    return { x: seedX, y: seedY };
+  }
+
   /** Apply a teleport to the authoritative snapshot. */
   private teleport(sessionId: string, x: number, y: number): void {
     const snap = this.players.get(sessionId);
@@ -1110,7 +1176,7 @@ export class OfficeRoom extends Room {
   /** Active social events scoped to a floor (admin events default to ground). */
   private activeEventsOnFloor(floorId: string, now: number): SocialEvent[] {
     return container.events.activeEvents(now).filter((e) => {
-      const ef = this.eventFloor.get(e.id) ?? this.groundFloorId;
+      const ef = this.eventFloor.get(e.id) ?? this.mainOfficeFloorId;
       return ef === floorId;
     });
   }
