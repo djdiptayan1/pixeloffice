@@ -2970,6 +2970,64 @@ body.reduced-motion *::after {
   flex: 0 0 auto;
 }
 
+/* Collapsible "WiFi auto-detect (optional)" help, shown only under the floor-
+   sync toggle when it's ON. Informational only — explains the companion helper.
+   Sits a touch indented so it reads as a child of the floor-sync row above. */
+.settings-wifi[hidden] {
+  display: none;
+}
+.settings-wifi {
+  margin: -4px 0 12px;
+  padding-left: 2px;
+}
+.settings-wifi-summary {
+  font-size: 11px;
+  color: var(--accent-2);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.settings-wifi-summary::-webkit-details-marker {
+  display: none;
+}
+.settings-wifi-summary::before {
+  content: "▸ ";
+  color: var(--muted);
+}
+.settings-wifi[open] .settings-wifi-summary::before {
+  content: "▾ ";
+}
+.settings-wifi-summary:hover {
+  filter: brightness(1.15);
+}
+.settings-wifi-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-wifi-help,
+.settings-wifi-privacy {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.settings-wifi-cmd {
+  display: block;
+  font-family: var(--font);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
 /* Office/Remote location pill. A subtle, rounded chip: Office uses the calm
    primary accent, Remote is muted. Shown in roster rows and the self top-bar
    indicator. Display-only; absent place => no pill rendered at all. */

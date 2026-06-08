@@ -63,6 +63,10 @@ import {
   createFloorLocationAdapter,
   type FloorLocationAdapter,
 } from "./location/floor-location.adapter";
+import {
+  createSsidFloorResolver,
+  type SsidFloorResolver,
+} from "./location/ssid-floor";
 import type { OfficeRoom } from "./rooms/office.room";
 
 // --- Synchronous, framework-free services (shared by REST + room) ----------
@@ -115,6 +119,17 @@ const maps: MapRepository = new InMemoryMapRepository();
 // inert) so the zero-config dev path is untouched. PRIVACY: the adapter never
 // logs/persists the IP and never keeps a location history (plan Principle 2).
 const floorLocation: FloorLocationAdapter = createFloorLocationAdapter();
+
+// --- OPT-IN SSID -> floor resolver (companion floor reports) ----------------
+// Maps a reported WiFi SSID to a floor id (SSID_FLOOR_MAP; defaults to the
+// KALVIUM office map, so it is effectively always available). Validated against
+// the active building's floor ids. A report only APPLIES to opted-in users (the
+// room enforces the SET_LOCATION_SYNC gate). PRIVACY: the SSID is never logged
+// or persisted — it is resolved to a floor id and discarded.
+const ssidFloor: SsidFloorResolver = createSsidFloorResolver(
+  process.env,
+  maps.getActiveBuilding().floors.map((f) => f.id),
+);
 
 // --- Ambient NPCs (so the office never feels empty) ------------------------
 // Framework-free behavior engine. Owns a seeded PRNG (NPC_SEED, default 42) so
@@ -225,6 +240,13 @@ export const container = {
    * Never logs/persists the IP (plan Principle 2).
    */
   floorLocation,
+  /**
+   * OPT-IN SSID -> floor resolver (companion floor reports). Maps a reported
+   * WiFi SSID to a floor id via SSID_FLOOR_MAP (defaults to the KALVIUM map, so
+   * effectively always available). A report only APPLIES to opted-in users.
+   * Never logs/persists the SSID (AGENTS.md Principle 1).
+   */
+  ssidFloor,
   auth,
   /** Auth config (providers map, jwt service, RBAC, AUTH_REQUIRED gate). */
   authConfig,

@@ -1162,6 +1162,61 @@ export class OfficeRoom extends Room {
     return Array.from(this.players.values()).map((p) => ({ ...p }));
   }
 
+  /** The active building's floor ids (for SSID->floor validation). */
+  floorIds(): string[] {
+    return this.building.floors.map((f) => f.id);
+  }
+
+  /**
+   * Apply an SSID-derived floor report to live HUMAN sessions sharing `clientIp`
+   * (the companion + browser run on the same machine, so they share a LAN IP).
+   * The floor-report HTTP route is the ONLY caller; the room stays the only
+   * Colyseus-aware module.
+   *
+   * For each matched session that has OPTED IN to floor sync (locationSync), set
+   * place="OFFICE" and, when the resolved floor differs from the current one,
+   * perform the SAME consented floor change the elevator/SET_LOCATION_SYNC path
+   * uses (free landing tile, PLAYER_LEFT/JOINED + FLOOR_CHANGED), then broadcast
+   * S2C.LOCATION (floor-scoped). Sessions that have NOT opted in are left
+   * untouched (human agency + opt-in). Returns how many sessions were updated.
+   *
+   * PRIVACY (AGENTS.md Principle 1): `clientIp` is matched against the transient
+   * per-session IP captured in onAuth and is NEVER logged or persisted here; the
+   * SSID never reaches this method (it was resolved to a floor id upstream).
+   */
+  applyFloorReport(clientIp: string | undefined, floorId: string): number {
+    if (!clientIp || !this.floors.has(floorId)) return 0;
+    let matched = 0;
+    // Snapshot the session ids first: changeFloor mutates while we iterate.
+    const sessionIds = Array.from(this.sessionIp.keys());
+    for (const sessionId of sessionIds) {
+      if (this.sessionIp.get(sessionId) !== clientIp) continue;
+      // OPT-IN gate: only act for sessions that explicitly enabled floor sync.
+      if (this.locationSync.get(sessionId) !== true) continue;
+      const snap = this.players.get(sessionId);
+      if (!snap || snap.isNpc) continue;
+      const client = this.clientFor(sessionId);
+      if (!client) continue;
+
+      // A floor report means the user is physically in the office.
+      snap.place = "OFFICE";
+      const currentFloorId = snap.floorId ?? this.groundFloorId;
+
+      if (currentFloorId !== floorId) {
+        // Consented floor change (the user opted in) — reuse elevator machinery.
+        const target = this.floors.get(floorId)!;
+        const land = this.freeTileNear(target, target.spawn.x, target.spawn.y);
+        this.changeFloor(client, snap, currentFloorId, floorId, land.x, land.y, snap.dir);
+      }
+
+      // Broadcast the Office tag on the (possibly new) floor (co-located only).
+      const location: LocationPayload = { sessionId, place: "OFFICE" };
+      this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.LOCATION, location);
+      matched += 1;
+    }
+    return matched;
+  }
+
   /** Other players (excluding `sessionId`) currently on `floorId`. */
   private othersOnFloor(sessionId: string, floorId: string): PlayerSnapshot[] {
     const out: PlayerSnapshot[] = [];

@@ -25,6 +25,7 @@ import { DEFAULT_SERVER_PORT, ROOM_NAME } from "@pixeloffice/shared";
 import { OfficeRoom } from "./rooms/office.room";
 import { createAdminRouter } from "./http/admin.routes";
 import { createMapsRouter } from "./http/maps.routes";
+import { createLocationRouter } from "./http/location.routes";
 import { createAuthRouter } from "./http/auth.routes";
 import { createHrRouter, type SessionUser } from "./http/hr.routes";
 import { emailForName } from "./integrations/hr/mock-greythr.adapter";
@@ -98,6 +99,14 @@ async function main(): Promise<void> {
   // Maps REST (multi-floor building list/load/save/activate for Map Studio).
   // Reads open; writes admin-guarded (same pattern as admin routes).
   app.use("/api/maps", createMapsRouter());
+
+  // Location floor-report REST. A companion helper on the user's machine reports
+  // the WiFi SSID; we map it to a floor and apply it to that machine's live
+  // sessions — but ONLY to users who opted in to floor sync (the room enforces
+  // this). PRIVACY: never logs/persists the SSID or IP. Self-report has no abuse
+  // surface, so the shared secret (FLOOR_SYNC_SECRET) is optional. Honors the
+  // same trust-proxy decision as the rate limiter.
+  app.use("/api/location", createLocationRouter({ trustProxy, resolver: container.ssidFloor }));
 
   // OAuth + session routes. With no providers configured the login/callback
   // routes 404 and /config reports an empty provider list (dev path unaffected).

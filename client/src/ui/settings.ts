@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 import { CAMERA_ZOOM, ZOOM_MAX as ZOOM_MAX_CONST, ZOOM_MIN as ZOOM_MIN_CONST } from "../game/constants";
+import { serverHttpBase } from "../net/connection";
 
 // v2: reset stale stored zooms so the 1.5x default takes effect for everyone.
 const ZOOM_KEY = "pixeloffice.settings.zoom.v2";
@@ -193,12 +194,51 @@ export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): Setti
   const locInput = document.createElement("input");
   locInput.type = "checkbox";
   locInput.checked = state.locationSync;
+  locField.append(locTextWrap, locInput);
+
+  // --- WiFi auto-detect help (companion helper) ---------------------------
+  // Informational only: floor sync works purely from the user's opt-in toggle
+  // (the server detects from the client IP). But on a flat office subnet the IP
+  // can't separate floors, so an OPTIONAL tiny companion helper on this machine
+  // reads the WiFi name and reports it. This block just explains how to run it.
+  // It adds NO network calls — the companion does the reporting. We surface it
+  // only while floor sync is ON, since it's meaningless when opted out.
+  // The command derives its server origin from serverHttpBase() (the same value
+  // the app already dials), so it's correct in dev, LAN, and same-origin deploys.
+  const wifi = document.createElement("details");
+  wifi.className = "settings-wifi";
+  const wifiSummary = document.createElement("summary");
+  wifiSummary.className = "settings-wifi-summary";
+  wifiSummary.textContent = "WiFi auto-detect (optional)";
+  const wifiBody = document.createElement("div");
+  wifiBody.className = "settings-wifi-body";
+  const wifiHelp = document.createElement("p");
+  wifiHelp.className = "settings-wifi-help";
+  wifiHelp.textContent =
+    "Your floor updates automatically if you run the tiny companion helper on this machine:";
+  const wifiCmd = document.createElement("code");
+  wifiCmd.className = "settings-wifi-cmd";
+  wifiCmd.textContent = `FLOOR_SYNC_SERVER=${serverHttpBase()} node companion/floor-sync.mjs`;
+  const wifiPrivacy = document.createElement("p");
+  wifiPrivacy.className = "settings-wifi-privacy";
+  wifiPrivacy.textContent =
+    "Only your WiFi name is read on your machine; nothing is stored.";
+  wifiBody.append(wifiHelp, wifiCmd, wifiPrivacy);
+  wifi.append(wifiSummary, wifiBody);
+  // Visibility tracks the opt-in toggle; collapse when hidden so reopening the
+  // section is a deliberate act each time it's shown.
+  const syncWifiVisibility = (): void => {
+    wifi.hidden = !state.locationSync;
+    if (!state.locationSync) wifi.open = false;
+  };
+  syncWifiVisibility();
+
   locInput.addEventListener("change", () => {
     state.locationSync = locInput.checked;
     write(LOCATION_SYNC_KEY, state.locationSync ? "1" : "0");
+    syncWifiVisibility();
     cb.onLocationSync(state.locationSync);
   });
-  locField.append(locTextWrap, locInput);
 
   // --- Show tour link -----------------------------------------------------
   const tourRow = document.createElement("div");
@@ -213,7 +253,7 @@ export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): Setti
   });
   tourRow.appendChild(tourLink);
 
-  pop.append(heading, zoomField, motionField, npcField, locField, tourRow);
+  pop.append(heading, zoomField, motionField, npcField, locField, wifi, tourRow);
 
   const wrap = document.createElement("div");
   wrap.className = "settings-wrap";
