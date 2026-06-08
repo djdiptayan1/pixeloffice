@@ -24,6 +24,7 @@ import { WebSocketTransport } from "@colyseus/ws-transport";
 import { DEFAULT_SERVER_PORT, ROOM_NAME } from "@pixeloffice/shared";
 import { OfficeRoom } from "./rooms/office.room";
 import { createAdminRouter } from "./http/admin.routes";
+import { createMapsRouter } from "./http/maps.routes";
 import { createAuthRouter } from "./http/auth.routes";
 import { createHrRouter, type SessionUser } from "./http/hr.routes";
 import { emailForName } from "./integrations/hr/mock-greythr.adapter";
@@ -42,45 +43,36 @@ async function main(): Promise<void> {
 
   const app = express();
 
-  // CORS: restrict to the client app origin instead of wildcard `*`, so a
-  // logged-in user's other tabs/sites cannot cross-origin read the API (roster
-  // PII, session claims). CONTRACT.md: "CORS enabled for the Vite origin".
-  // CORS_ORIGINS (comma-separated) overrides; default is the client app URL.
-  const corsOrigins = (process.env.CORS_ORIGINS ?? process.env.CLIENT_APP_URL ?? "http://localhost:5173")
+  // CORS: don't use wildcard `*` (so a logged-in user's other tabs/sites cannot
+  // cross-origin read the API — roster PII, session claims). CONTRACT.md: "CORS
+  // enabled for the Vite origin". When CORS_ORIGINS/CLIENT_APP_URL is set we honor
+  // that exact allowlist (production). Otherwise we reflect any localhost/LAN
+  // origin on the Vite dev (5173) or preview (4173) port — this keeps the
+  // ship-tested flows working: dev, `vite preview`, and a teammate joining over
+  // the LAN by IP (a real feature) — without ever opening the API to the wider web.
+  const explicitOrigins = (process.env.CORS_ORIGINS ?? process.env.CLIENT_APP_URL ?? "")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean);
-  // Vite dev (5173) and preview (4173) serve the client from a SEPARATE origin
-  // than the API, so every REST/login call is cross-origin and triggers a CORS
-  // preflight. Over a LAN the page origin is http://<lan-ip>:5173 — NOT in the
-  // static allow-list — so without accepting it every API/login call fails with
-  // an opaque "no response" (the preflight is rejected). In DEV ONLY we also
-  // allow any host on the Vite dev/preview ports so `npm run dev` works from any
-  // device on the network. In production the client is served same-origin
-  // (SERVE_CLIENT) so this relaxation is gated OFF — prod uses only the explicit
-  // CORS_ORIGINS/CLIENT_APP_URL allow-list, identical to before this change.
-  const VITE_DEV_PORTS = new Set(["5173", "4173"]);
-  const corsAllowList = new Set(corsOrigins);
-  const allowViteDevPorts =
-    process.env.NODE_ENV !== "production" && !shouldServeClient();
-  app.use(
-    cors({
-      origin(origin, callback) {
-        // No Origin header = non-browser or same-origin (curl, health checks,
-        // server-to-server) — always allow.
-        if (!origin) return callback(null, true);
-        if (corsAllowList.has(origin)) return callback(null, true);
-        if (allowViteDevPorts) {
-          try {
-            if (VITE_DEV_PORTS.has(new URL(origin).port)) return callback(null, true);
-          } catch {
-            /* malformed Origin — fall through to deny */
-          }
+  const VITE_PORTS = new Set(["5173", "4173"]);
+  const corsOrigin: cors.CorsOptions["origin"] = explicitOrigins.length
+    ? explicitOrigins
+    : (origin, cb) => {
+        if (!origin) return cb(null, true); // same-origin / curl / server-to-server
+        try {
+          const u = new URL(origin);
+          const localish =
+            u.hostname === "localhost" ||
+            u.hostname === "127.0.0.1" ||
+            /^(10|127)\./.test(u.hostname) ||
+            /^192\.168\./.test(u.hostname) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(u.hostname);
+          return cb(null, localish && VITE_PORTS.has(u.port));
+        } catch {
+          return cb(null, false);
         }
-        callback(null, false);
-      },
-    }),
-  );
+      };
+  app.use(cors({ origin: corsOrigin }));
   app.use(express.json());
 
   // Behind a vetted reverse proxy (the single-container prod deploy), trust the
@@ -102,6 +94,10 @@ async function main(): Promise<void> {
   // Admin REST (events / meetings / broadcast / users / health). The router
   // guards protected writes itself when AUTH_REQUIRED=true (open in dev).
   app.use("/api", createAdminRouter());
+
+  // Maps REST (multi-floor building list/load/save/activate for Map Studio).
+  // Reads open; writes admin-guarded (same pattern as admin routes).
+  app.use("/api/maps", createMapsRouter());
 
   // OAuth + session routes. With no providers configured the login/callback
   // routes 404 and /config reports an empty provider list (dev path unaffected).

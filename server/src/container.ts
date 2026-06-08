@@ -57,6 +57,11 @@ import type { Database } from "./persistence/database";
 import type { RedisStore } from "./persistence/redis";
 import { buildOfficeMap } from "@pixeloffice/shared";
 import { NpcService, mulberry32, npcConfigFromEnv } from "./npcs/npc.service";
+import { InMemoryMapRepository, type MapRepository } from "./maps/map-repository";
+import {
+  createFloorLocationAdapter,
+  type FloorLocationAdapter,
+} from "./location/floor-location.adapter";
 import type { OfficeRoom } from "./rooms/office.room";
 
 // --- Synchronous, framework-free services (shared by REST + room) ----------
@@ -96,6 +101,19 @@ const calendar: CalendarAdapter = googleCalendar
   : mockCalendar;
 const events = new EventService();
 const presence = new PresenceService(calendar, events);
+
+// --- Multi-floor building / map repository ---------------------------------
+// Source of the ACTIVE building (a stack of floors). The room reads the active
+// building here at create; Map Studio lists/saves/activates via /api/maps. The
+// default seed is the 3-floor building. In-memory in dev (DB/file-backed in prod).
+const maps: MapRepository = new InMemoryMapRepository();
+
+// --- OPT-IN physical-floor detection (off unless OFFICE_SUBNETS/OFFICE_CIDRS) -
+// Framework-free adapter that maps a client IP -> Office/Remote + an optional
+// floor id. With no env it resolves to the Noop impl (everyone REMOTE, feature
+// inert) so the zero-config dev path is untouched. PRIVACY: the adapter never
+// logs/persists the IP and never keeps a location history (plan Principle 2).
+const floorLocation: FloorLocationAdapter = createFloorLocationAdapter();
 
 // --- Ambient NPCs (so the office never feels empty) ------------------------
 // Framework-free behavior engine. Owns a seeded PRNG (NPC_SEED, default 42) so
@@ -198,6 +216,14 @@ export const container = {
   presence,
   /** Ambient office NPCs (framework-free; the room wires effects to the wire). */
   npcs,
+  /** Active building + saved maps (the room reads the active building at create). */
+  maps,
+  /**
+   * OPT-IN physical-floor detection adapter (IP -> Office/Remote + floor). Noop
+   * (enabled()=false, everyone REMOTE) unless OFFICE_SUBNETS/OFFICE_CIDRS is set.
+   * Never logs/persists the IP (plan Principle 2).
+   */
+  floorLocation,
   auth,
   /** Auth config (providers map, jwt service, RBAC, AUTH_REQUIRED gate). */
   authConfig,

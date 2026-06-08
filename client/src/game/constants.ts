@@ -29,6 +29,9 @@ export const PAN_MS = 600;
 export const ZOOM_TWEEN_MS = 300;
 /** After a pan-to-player, how long before the camera resumes following self. */
 export const PAN_RESUME_MS = 1500;
+/** Half-duration of the camera fade out/in when swapping floors (ms). Instant
+ *  under reduced-motion. */
+export const FLOOR_FADE_MS = 220;
 
 // --- Depth bands ------------------------------------------------------------
 // Floors at the bottom, then walls, then y-sorted entities, then UI on top.

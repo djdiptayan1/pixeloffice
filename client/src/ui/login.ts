@@ -325,9 +325,8 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   oauthArea.hidden = true;
 
   const divider = document.createElement("p");
-  divider.className = "login-footer";
-  divider.style.margin = "8px 0";
-  divider.textContent = "— or continue as a guest —";
+  divider.className = "login-divider";
+  divider.textContent = "or continue as a guest";
   divider.hidden = true;
 
   const setBusy = (busy: boolean) => {

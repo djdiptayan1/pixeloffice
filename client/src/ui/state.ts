@@ -13,6 +13,7 @@ import type {
   PresenceState,
   SocialEvent,
   ActiveGame,
+  BuildingSummary,
 } from "@pixeloffice/shared";
 
 export interface UiState {
@@ -31,6 +32,20 @@ export interface UiState {
   activeGameId: string | null;
   interactPrompt: string | null;
   interactGameId: string | null;
+  /**
+   * The active building summary (floor list) from the WELCOME payload, or null
+   * when the server is pre-multifloor. Display-only — the floor indicator reads
+   * it to render the building's floors. Optional/backward-compatible: if the
+   * integrator never sets it, the floor indicator falls back to showing only the
+   * self player's current floor.
+   */
+  building: BuildingSummary | null;
+  /**
+   * The self player's current floor id (mirrors `self().floorId`, but tracked
+   * explicitly so FLOOR_CHANGED can update it even before the player snapshot is
+   * re-seeded). Absent floor data is treated as the ground floor by consumers.
+   */
+  selfFloorId: string | null;
 }
 
 type Listener = (state: UiState) => void;
@@ -51,6 +66,8 @@ export class Store {
       activeGameId: null,
       interactPrompt: null,
       interactGameId: null,
+      building: null,
+      selfFloorId: null,
     };
   }
 
@@ -102,6 +119,20 @@ export class Store {
     if (!p) return;
     p.presence = presence;
     p.source = source;
+    this.emit();
+  }
+
+  /**
+   * Apply a player's OPT-IN physical-location tag (S2C.LOCATION / inline on a
+   * snapshot). Pass `undefined` to clear it (sync turned off => no badge). This
+   * is ORTHOGONAL to presence — it never touches `presence`/`source`. Pure data
+   * application: privacy-wise the client mirrors only the transient Office/Remote
+   * tag, never a location history (plan.md "presence, not surveillance").
+   */
+  setPlace(sessionId: string, place: "OFFICE" | "REMOTE" | undefined): void {
+    const p = this.state.players.get(sessionId);
+    if (!p) return;
+    p.place = place;
     this.emit();
   }
 
@@ -165,8 +196,35 @@ export class Store {
     this.emit();
   }
 
+  /**
+   * Record the active building summary (floor list) from WELCOME. Display-only;
+   * the floor indicator renders the building's floors from this. Idempotent.
+   */
+  setBuilding(building: BuildingSummary | null): void {
+    this.state.building = building;
+    this.emit();
+  }
+
+  /**
+   * Record the self player's current floor id (from WELCOME's self.floorId or a
+   * FLOOR_CHANGED message). Display-only — never moves an avatar (human agency).
+   */
+  setSelfFloor(floorId: string | null): void {
+    this.state.selfFloorId = floorId;
+    this.emit();
+  }
+
   /** Convenience: the local player snapshot, if known. */
   self(): PlayerSnapshot | undefined {
     return this.state.players.get(this.state.selfId);
+  }
+
+  /**
+   * The self player's effective floor id. Prefers the explicitly-tracked floor
+   * (FLOOR_CHANGED), then the self snapshot's floorId, defaulting to "ground"
+   * for pre-multifloor servers (contract: absent floorId means ground).
+   */
+  selfFloorId(): string {
+    return this.state.selfFloorId ?? this.self()?.floorId ?? "ground";
   }
 }
