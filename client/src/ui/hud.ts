@@ -116,6 +116,13 @@ export interface HudCallbacks {
   onChatFocus?(focused: boolean): void;
   onLeaveGame(gameId: string): void;
   onGameInput(gameId: string, input: any): void;
+  /**
+   * Pool only: (re)join a game with an explicit mode. Used by the pool entry
+   * chooser to switch a freshly-joined GROUP seat into a SOLO-vs-AI game (the
+   * overlay leaves the group seat, then rejoins with mode:"ai"). Forwarded to
+   * C2S.JOIN_GAME with the mode. Other games never call this. Optional/back-compat.
+   */
+  onJoinGame?(gameId: string, mode: "ai" | "group"): void;
   onLocate?(sessionId: string): void;
   onOpenProfile?(sessionId: string): void;
   isNpcHidden?(): boolean;

@@ -56,6 +56,7 @@ export type FurnitureKind =
   | "vending-machine"
   | "water-cooler"
   | "ping-pong-table"
+  | "pool-table"
   | "beanbag"
   | "whiteboard"
   | "desk-lamp"
@@ -245,6 +246,9 @@ export function buildOfficeMap(): OfficeMap {
   furniture.push({ kind: "beanbag", x: 41, y: 15, w: 1, h: 1, solid: false });
   furniture.push({ kind: "beanbag", x: 41, y: 19, w: 1, h: 1, solid: false });
   furniture.push({ kind: "ping-pong-table", x: 38, y: 21, w: 3, h: 2, solid: true });
+  // 8-ball pool table game-station (interactive — opens the pool overlay on [E]).
+  // Solid (you walk up to it), with walkable approach tiles all around it.
+  furniture.push({ kind: "pool-table", x: 43, y: 21, w: 3, h: 2, solid: true });
   furniture.push({ kind: "arcade-cabinet", x: 35, y: 15, w: 1, h: 1, solid: true });
   furniture.push({ kind: "chess-table", x: 45, y: 15, w: 1, h: 1, solid: true });
 

@@ -613,6 +613,13 @@ export class OfficeScene extends Phaser.Scene {
         return;
       }
 
+      // Pool table footprint x:43..45, y:21..22 → prompt on the surrounding ring.
+      if (x >= 42 && x <= 46 && y >= 20 && y <= 23) {
+        this.currentPromptGameId = "lounge:pool";
+        this.cb.onInteractPrompt("Press [E] to play Pool", this.currentPromptGameId);
+        return;
+      }
+
       // Arcade Cabinet: x: 35, y: 15
       if (Math.abs(x - 35) <= 1 && Math.abs(y - 15) <= 1) {
         this.currentPromptGameId = "lounge:connect-four";

@@ -296,6 +296,15 @@ export interface ToastPayload {
 
 export interface JoinGamePayload {
   gameId: string;
+  /**
+   * Pool only: how to start the game when the sender is the FIRST to join an idle
+   * pool table. OPTIONAL and backward-compatible:
+   *   - "ai"   => start immediately as SOLO vs the server AI (the AI takes seat 2).
+   *   - "group" (or absent) => wait for a second human, exactly like the other
+   *     lounge games. A later joiner takes seat 2; further joiners spectate.
+   * Ignored by non-pool games and by joiners who are not seat 1.
+   */
+  mode?: "ai" | "group";
 }
 
 export interface LeaveGamePayload {

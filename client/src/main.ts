@@ -381,6 +381,7 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onChatFocus: (focused) => localGame.setInputLocked(focused),
     onLeaveGame: (gameId) => conn.send(C2S.LEAVE_GAME, { gameId }),
     onGameInput: (gameId, input) => conn.send(C2S.GAME_INPUT, { gameId, input }),
+    onJoinGame: (gameId, mode) => conn.send(C2S.JOIN_GAME, { gameId, mode }),
     onLocate: (sessionId) => locate(sessionId),
     onOpenProfile: (sessionId) => openProfile(sessionId),
     isNpcHidden: () => readHideNpcs(),

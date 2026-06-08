@@ -816,6 +816,34 @@ const FURNITURE_SPECS: Record<FurnitureKind, FurnSpec> = {
       px(ctx, W - 6, H - 4, 2, 4, "#1b5e20");
     },
   },
+  "pool-table": {
+    w: 3,
+    h: 2,
+    draw(ctx, W, H) {
+      transparent(ctx, W, H);
+      // Wooden rail frame.
+      outlineRect(ctx, 0, 2, W, H - 4, "#5a3d26", "#362214");
+      // Green felt playfield.
+      outlineRect(ctx, 3, 5, W - 6, H - 10, "#11623a", "#0a3f25");
+      // Six pockets (4 corners + 2 mid long-rail).
+      const pk = (x: number, y: number) => px(ctx, x, y, 2, 2, "#05080a");
+      pk(3, 5);
+      pk(Math.floor(W / 2) - 1, 4);
+      pk(W - 5, 5);
+      pk(3, H - 7);
+      pk(Math.floor(W / 2) - 1, H - 6);
+      pk(W - 5, H - 7);
+      // Racked balls + cue.
+      px(ctx, W - 12, Math.floor(H / 2) - 1, 2, 2, "#f2c200");
+      px(ctx, W - 10, Math.floor(H / 2) - 2, 2, 2, "#1f6fd8");
+      px(ctx, W - 10, Math.floor(H / 2), 2, 2, "#ef6258");
+      px(ctx, W - 8, Math.floor(H / 2) - 1, 2, 2, "#15181d"); // eight
+      px(ctx, 9, Math.floor(H / 2) - 1, 2, 2, "#f4f1e8"); // cue
+      // Legs.
+      px(ctx, 3, H - 4, 2, 4, "#362214");
+      px(ctx, W - 5, H - 4, 2, 4, "#362214");
+    },
+  },
   "vending-machine": {
     w: 1,
     h: 1,

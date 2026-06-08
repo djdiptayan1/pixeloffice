@@ -58,13 +58,24 @@ import {
   type SocialEvent,
   type ToastPayload,
   type WelcomePayload,
+  POOL_AI_SESSION_ID,
   type ActiveGame,
   type GameType,
   type GamePlayer,
   type PongState,
   type TicTacToeState,
   type ConnectFourState,
+  type PoolState,
+  type PoolShotInput,
 } from "@pixeloffice/shared";
+import {
+  freshPoolState,
+  applyShot,
+  resolveShot,
+  pickShot,
+  makePrng,
+  type PoolDifficulty,
+} from "../games/pool";
 import { container } from "../container";
 import { createLogger } from "../logging/logger";
 import { TokenBucket } from "../http/rate-limit";
@@ -172,6 +183,18 @@ export class OfficeRoom extends Room {
   private paddle1Dir = 0;
   private paddle2Dir = 0;
 
+  /** Per-pool-game AI turn timers (so a leave can cancel a pending AI shot). */
+  private readonly poolAiTimers = new Map<string, any>();
+  /** Monotonic seed source for deterministic-per-game AI PRNGs. */
+  private poolSeedCounter = 0x9e3779b1;
+  /** AI difficulty for solo pool (env-overridable; defaults to medium). */
+  private readonly poolAiDifficulty: PoolDifficulty =
+    (["easy", "medium", "hard"] as const).includes(
+      (process.env.POOL_AI_DIFFICULTY ?? "").toLowerCase() as PoolDifficulty,
+    )
+      ? ((process.env.POOL_AI_DIFFICULTY as string).toLowerCase() as PoolDifficulty)
+      : "medium";
+
   // Bound service-listener handlers, retained so onDispose can remove EXACTLY
   // the listeners this instance added to the shared singleton emitters (a 2nd
   // room must not leave stale closures behind that cross-broadcast).
@@ -222,6 +245,18 @@ export class OfficeRoom extends Room {
       score2: 0,
       winnerSessionId: null,
       state: { board: Array(6).fill(null).map(() => Array(7).fill("")), turn: "" },
+      status: "idle",
+    });
+
+    this.games.set("lounge:pool", {
+      id: "lounge:pool",
+      type: "pool",
+      player1: null,
+      player2: null,
+      score1: 0,
+      score2: 0,
+      winnerSessionId: null,
+      state: null,
       status: "idle",
     });
 
@@ -1122,7 +1157,7 @@ export class OfficeRoom extends Room {
   // Lounge Games logic
   // -------------------------------------------------------------------------
 
-  private handleJoinGame(client: Client, payload: { gameId: string }): void {
+  private handleJoinGame(client: Client, payload: { gameId: string; mode?: "ai" | "group" }): void {
     if (!this.allow(this.actionBuckets, client.sessionId)) return;
     const gameId = payload?.gameId;
     if (typeof gameId !== "string") return;
@@ -1132,6 +1167,9 @@ export class OfficeRoom extends Room {
     const snap = this.players.get(client.sessionId);
     if (!snap) return;
 
+    // A player already at THIS pool table as a human seat that is already full +
+    // playing => extra joiners become spectators (no seat). They simply receive
+    // the broadcast GAME_UPDATE like everyone else; nothing to do here.
     // Check if player is already in this game or another game
     for (const g of this.games.values()) {
       if (g.player1?.sessionId === client.sessionId || g.player2?.sessionId === client.sessionId) {
@@ -1144,6 +1182,11 @@ export class OfficeRoom extends Room {
       name: snap.name,
       avatarId: snap.avatarId,
     };
+
+    if (game.type === "pool") {
+      this.handleJoinPool(client, game, gamePlayer, payload?.mode);
+      return;
+    }
 
     if (!game.player1) {
       game.player1 = gamePlayer;
@@ -1162,6 +1205,57 @@ export class OfficeRoom extends Room {
     container.presence.tick(Date.now());
 
     this.broadcast(S2C.GAME_UPDATE, { game });
+  }
+
+  /**
+   * Pool join. Supports SOLO vs AI ("ai") and GROUP (two humans, then spectators).
+   *   - Seat 1 empty: take it. If mode is "ai", seat 2 becomes the server AI and
+   *     play starts immediately; otherwise wait for a second human.
+   *   - Seat 1 a human, seat 2 empty, NOT vs-AI: take seat 2, play starts.
+   *   - Both seats taken (or vs-AI in progress): spectator — no seat.
+   * The AI never occupies a real client, so only humans get FOCUS presence.
+   */
+  private handleJoinPool(
+    client: Client,
+    game: ActiveGame,
+    gamePlayer: GamePlayer,
+    mode: "ai" | "group" | undefined,
+  ): void {
+    if (!game.player1) {
+      game.player1 = gamePlayer;
+      this.lockForGame(client.sessionId);
+      if (mode === "ai") {
+        game.vsAi = true;
+        game.player2 = { sessionId: POOL_AI_SESSION_ID, name: "Pool Bot", avatarId: "slate" };
+        game.status = "playing";
+        this.resetGameState(game);
+      } else {
+        game.vsAi = false;
+        game.status = "waiting";
+      }
+    } else if (!game.player2 && !game.vsAi) {
+      game.player2 = gamePlayer;
+      this.lockForGame(client.sessionId);
+      game.status = "playing";
+      this.resetGameState(game);
+    } else {
+      // Spectator: no seat. Push them the current state so they can watch.
+      const c = this.clientFor(client.sessionId);
+      if (c) c.send(S2C.GAME_UPDATE, { game });
+      return;
+    }
+
+    this.broadcast(S2C.GAME_UPDATE, { game });
+
+    // If the AI happens to break (it is player1's opponent and player1 always
+    // breaks here), no scheduling is needed — player1/human breaks first.
+  }
+
+  /** Set a human to FOCUS for the duration of a game (locks ambient walking UI). */
+  private lockForGame(sessionId: string): void {
+    container.presence.activity(sessionId, Date.now());
+    container.presence.setManual(sessionId, "FOCUS");
+    container.presence.tick(Date.now());
   }
 
   private resetGameState(game: ActiveGame): void {
@@ -1188,6 +1282,11 @@ export class OfficeRoom extends Room {
         board: Array(6).fill(null).map(() => Array(7).fill("")),
         turn: game.player1!.sessionId,
       } as ConnectFourState;
+    } else if (game.type === "pool") {
+      game.score1 = 0;
+      game.score2 = 0;
+      // Player 1 always breaks.
+      game.state = freshPoolState(game.player1!.sessionId);
     }
   }
 
@@ -1201,6 +1300,12 @@ export class OfficeRoom extends Room {
   }
 
   private leaveGame(game: ActiveGame, sessionId: string): void {
+    // Pool has its own lifecycle (AI seat + forfeit + AI timer cleanup).
+    if (game.type === "pool") {
+      this.leavePool(game, sessionId);
+      return;
+    }
+
     let removed = false;
     if (game.player1?.sessionId === sessionId) {
       game.player1 = null;
@@ -1349,6 +1454,11 @@ export class OfficeRoom extends Room {
     const input = payload?.input;
     if (!input) return;
 
+    if (game.type === "pool") {
+      this.handlePoolShot(client.sessionId, game, input);
+      return;
+    }
+
     if (game.type === "ping-pong") {
       const isPlayer1 = game.player1?.sessionId === client.sessionId;
       const isPlayer2 = game.player2?.sessionId === client.sessionId;
@@ -1414,6 +1524,195 @@ export class OfficeRoom extends Room {
 
       this.broadcast(S2C.GAME_UPDATE, { game });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 8-Ball Pool (server-authoritative; framework-free engine in games/pool/**).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Validate a human shot, simulate it deterministically, apply 8-ball rules,
+   * broadcast the resulting animation state, then advance the turn (and schedule
+   * the AI's reply in solo mode). Spectators are simply ignored as shooters.
+   */
+  private handlePoolShot(sessionId: string, game: ActiveGame, input: unknown): void {
+    const state = game.state as PoolState | null;
+    if (!state || state.animating) return; // mid-shot: drop input
+
+    // Only the player whose turn it is may shoot. The AI shoots via its timer.
+    if (state.currentTurn !== sessionId) return;
+    // The shooter must occupy a real seat (not a spectator).
+    if (game.player1?.sessionId !== sessionId && game.player2?.sessionId !== sessionId) return;
+
+    const shot = this.parsePoolShot(input);
+    if (!shot) return;
+
+    this.applyPoolShot(game, sessionId, shot);
+  }
+
+  private parsePoolShot(input: unknown): PoolShotInput | null {
+    if (!input || typeof input !== "object") return null;
+    const i = input as Record<string, unknown>;
+    const angleRad = i.angleRad;
+    const power = i.power;
+    if (typeof angleRad !== "number" || !Number.isFinite(angleRad)) return null;
+    if (typeof power !== "number" || !Number.isFinite(power)) return null;
+    const shot: PoolShotInput = {
+      angleRad,
+      power: Math.max(0, Math.min(1, power)),
+    };
+    if (typeof i.cueX === "number" && Number.isFinite(i.cueX)) shot.cueX = i.cueX;
+    if (typeof i.cueY === "number" && Number.isFinite(i.cueY)) shot.cueY = i.cueY;
+    return shot;
+  }
+
+  /**
+   * Core shot pipeline shared by humans + AI. Simulates to rest, applies rules,
+   * sets winner/score, broadcasts the animation, and schedules the AI if it is
+   * the AI's turn next.
+   */
+  private applyPoolShot(game: ActiveGame, shooter: string, shot: PoolShotInput): void {
+    const state = game.state as PoolState;
+    const p1 = game.player1!.sessionId;
+    const p2 = game.player2!.sessionId;
+    const opponent = shooter === p1 ? p2 : p1;
+
+    // Honor ball-in-hand re-spot before the shot (clamped on the client; we trust
+    // only finite numbers inside the playfield-ish range — physics clamps anyway).
+    const balls = state.balls.map((b) => ({ ...b }));
+    if (state.ballInHand && typeof shot.cueX === "number" && typeof shot.cueY === "number") {
+      const cue = balls.find((b) => b.id === 0);
+      if (cue) {
+        cue.pocketed = false;
+        cue.x = shot.cueX;
+        cue.y = shot.cueY;
+        cue.vx = 0;
+        cue.vy = 0;
+      }
+    } else if (state.ballInHand) {
+      // Ball-in-hand but no placement given: re-spot a pocketed cue to the head spot.
+      const cue = balls.find((b) => b.id === 0);
+      if (cue && cue.pocketed) {
+        cue.pocketed = false;
+        cue.x = 50; // POOL_TABLE_W * 0.25
+        cue.y = 50; // POOL_TABLE_H / 2
+        cue.vx = 0;
+        cue.vy = 0;
+      }
+    }
+
+    const sim = applyShot(balls, shot.angleRad, shot.power);
+    const result = resolveShot({ ...state, balls }, shooter, opponent, sim);
+
+    const next = result.state;
+    next.trajectory = sim.trajectory;
+    game.state = next;
+
+    if (result.winnerSessionId !== undefined) {
+      game.winnerSessionId = result.winnerSessionId; // may be "AI"
+      game.status = "gameover";
+      // Cancel any pending AI timer for this game.
+      const t = this.poolAiTimers.get(game.id);
+      if (t) {
+        t.clear();
+        this.poolAiTimers.delete(game.id);
+      }
+      this.broadcast(S2C.GAME_UPDATE, { game });
+      return;
+    }
+
+    this.broadcast(S2C.GAME_UPDATE, { game });
+
+    // Solo vs AI: if it is now the AI's turn, schedule the AI's reply after a
+    // short delay so the client can animate the human's shot first.
+    if (game.vsAi && next.currentTurn === POOL_AI_SESSION_ID && game.status === "playing") {
+      this.scheduleAiPoolTurn(game);
+    }
+  }
+
+  /**
+   * A player leaves/forfeits a pool game. Frees their seat, releases FOCUS, and:
+   *   - cancels any pending AI timer for this game,
+   *   - if a game was in progress with two seats, the remaining HUMAN seat wins
+   *     by forfeit (vs-AI leaves simply end the game, no winner),
+   *   - resets the table to idle once empty so the station frees up.
+   */
+  private leavePool(game: ActiveGame, sessionId: string): void {
+    let removed = false;
+    let wasPlayer1 = false;
+    if (game.player1?.sessionId === sessionId) {
+      game.player1 = null;
+      removed = true;
+      wasPlayer1 = true;
+    } else if (game.player2?.sessionId === sessionId) {
+      game.player2 = null;
+      removed = true;
+    }
+    if (!removed) return; // spectator left — nothing to free
+
+    container.presence.setManual(sessionId, "AVAILABLE");
+    container.presence.tick(Date.now());
+
+    // Cancel a pending AI shot for this table.
+    const timer = this.poolAiTimers.get(game.id);
+    if (timer) {
+      timer.clear();
+      this.poolAiTimers.delete(game.id);
+    }
+
+    if (game.status === "playing") {
+      if (game.vsAi) {
+        // The lone human left a solo game: drop the AI seat and reset the table.
+        game.player1 = null;
+        game.player2 = null;
+        game.vsAi = false;
+        game.status = "idle";
+        game.state = null;
+        game.winnerSessionId = null;
+      } else {
+        // Two-human game in progress: the remaining human wins by forfeit.
+        const remaining = wasPlayer1 ? game.player2 : game.player1;
+        if (remaining) {
+          game.winnerSessionId = remaining.sessionId;
+          game.status = "gameover";
+        } else {
+          game.status = "idle";
+          game.state = null;
+        }
+      }
+    } else {
+      // waiting / gameover: collapse to idle when empty, else keep the lone seat.
+      if (!game.player1 && !game.player2) {
+        game.status = "idle";
+        game.state = null;
+        game.vsAi = false;
+        game.winnerSessionId = null;
+      } else {
+        game.status = "waiting";
+      }
+    }
+
+    this.broadcast(S2C.GAME_UPDATE, { game });
+  }
+
+  /** Schedule the AI's pool shot after a brief, animation-friendly delay. */
+  private scheduleAiPoolTurn(game: ActiveGame): void {
+    const existing = this.poolAiTimers.get(game.id);
+    if (existing) existing.clear();
+    const timer = this.clock.setTimeout(() => {
+      this.poolAiTimers.delete(game.id);
+      const g = this.games.get(game.id);
+      if (!g || g.type !== "pool" || g.status !== "playing") return;
+      if (!g.vsAi) return;
+      const st = g.state as PoolState | null;
+      if (!st || st.currentTurn !== POOL_AI_SESSION_ID) return;
+
+      // Deterministic per-shot PRNG seed (advances each AI shot).
+      const seed = (this.poolSeedCounter = (this.poolSeedCounter + 0x9e3779b1) | 0);
+      const shot = pickShot(st, POOL_AI_SESSION_ID, this.poolAiDifficulty, makePrng(seed));
+      this.applyPoolShot(g, POOL_AI_SESSION_ID, shot);
+    }, 1400);
+    this.poolAiTimers.set(game.id, timer);
   }
 
   private checkTicTacToeWin(board: string[], symbol: string): boolean {
