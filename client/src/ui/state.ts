@@ -122,6 +122,20 @@ export class Store {
     this.emit();
   }
 
+  /**
+   * Apply a player's OPT-IN physical-location tag (S2C.LOCATION / inline on a
+   * snapshot). Pass `undefined` to clear it (sync turned off => no badge). This
+   * is ORTHOGONAL to presence — it never touches `presence`/`source`. Pure data
+   * application: privacy-wise the client mirrors only the transient Office/Remote
+   * tag, never a location history (plan.md "presence, not surveillance").
+   */
+  setPlace(sessionId: string, place: "OFFICE" | "REMOTE" | undefined): void {
+    const p = this.state.players.get(sessionId);
+    if (!p) return;
+    p.place = place;
+    this.emit();
+  }
+
   setSelfArea(area: string): void {
     this.state.selfArea = area || "Hallway";
     this.emit();

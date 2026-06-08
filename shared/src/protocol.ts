@@ -35,6 +35,13 @@ export const C2S = {
   GAME_INPUT: "game-input",
   /** Edit own profile (name / department / avatar) from the profile modal. */
   UPDATE_PROFILE: "update-profile",
+  /**
+   * OPT-IN physical-floor sync toggle. The user explicitly turns this ON in
+   * Settings to let the server tag them OFFICE/REMOTE from their IP (and, when
+   * OFFICE, move them to the detected floor). OFF by default. See
+   * SetLocationSyncPayload + S2C.LOCATION + docs/FLOOR-LOCATION-CONTRACT.md.
+   */
+  SET_LOCATION_SYNC: "set-location-sync",
 } as const;
 
 /** Options sent when joining the room (dev auth profile). */
@@ -80,6 +87,26 @@ export interface UpdateProfilePayload {
   avatarId?: AvatarId;
 }
 
+/**
+ * Toggle OPT-IN physical-floor sync (C2S.SET_LOCATION_SYNC).
+ *
+ * `enabled: true`  — the user consents: the server classifies their IP
+ *   (OFFICE/REMOTE), broadcasts S2C.LOCATION (floor-scoped), and — ONLY if the
+ *   classification is OFFICE and the IP maps to a real floor different from the
+ *   user's current one — performs the SAME server-side floor change the elevator
+ *   uses (a normal S2C.FLOOR_CHANGED follows). This movement is consented (the
+ *   user flipped the switch), never employer-forced surveillance.
+ * `enabled: false` — sync off: the server clears the user's `place` back to
+ *   absent, broadcasts a "cleared" S2C.LOCATION (see LocationPayload), and NEVER
+ *   moves the avatar. The game then behaves exactly as if sync were never on.
+ *
+ * When no office subnets are configured server-side (the zero-config default),
+ * enabling sync still works but always classifies REMOTE (no office to match).
+ */
+export interface SetLocationSyncPayload {
+  enabled: boolean;
+}
+
 // ---------------------------- server -> client ----------------------------
 
 export const S2C = {
@@ -108,6 +135,14 @@ export const S2C = {
   GAME_UPDATE: "game-update",
   /** A player changed their name / department / avatar (profile edit). */
   PLAYER_UPDATED: "player-updated",
+  /**
+   * A player's OPT-IN physical-location tag changed (they toggled floor sync).
+   * Broadcast FLOOR-SCOPED like the other per-player updates. See LocationPayload
+   * for how an OFF/"cleared" state is represented. Turning sync ON may be FOLLOWED
+   * by a normal S2C.FLOOR_CHANGED if the detected floor differs (consented);
+   * turning it OFF clears the tag and NEVER moves the avatar.
+   */
+  LOCATION: "location",
 } as const;
 
 /** A floor's identity as advertised to the client (no geometry — fetched via /api/maps). */
@@ -170,6 +205,27 @@ export interface PlayerJoinedPayload {
 
 export interface PlayerLeftPayload {
   sessionId: string;
+}
+
+/**
+ * A player's OPT-IN physical-location tag changed (S2C.LOCATION). Broadcast
+ * FLOOR-SCOPED (only co-located clients hear it), and also carried inline on
+ * WELCOME/PLAYER_JOINED snapshots (PlayerSnapshot.place) so the badge shows
+ * immediately on first paint.
+ *
+ * Representing OFF / "cleared":
+ *   - `place: "OFFICE" | "REMOTE"` is sent while sync is ON.
+ *   - When the user turns sync OFF the server sends `cleared: true` (and a
+ *     best-effort `place: "REMOTE"` for older clients). On `cleared`, the client
+ *     MUST treat the player's `place` as ABSENT (remove the badge) — do NOT show
+ *     "Remote". The authoritative snapshot's `place` becomes undefined.
+ */
+export interface LocationPayload {
+  sessionId: string;
+  /** The current tag while sync is ON. On a cleared event this is the legacy hint only. */
+  place: "OFFICE" | "REMOTE";
+  /** True when sync was turned OFF: clear the badge (treat place as absent). */
+  cleared?: boolean;
 }
 
 /** A player's display profile changed (name / department / avatar). */

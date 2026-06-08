@@ -57,6 +57,28 @@ function areaNameFor(p: PlayerSnapshot): string {
   return areaAt(MAP, p.x, p.y)?.name ?? "Hallway";
 }
 
+/**
+ * Build the OPT-IN physical-location pill for a player, or `null` when the player
+ * has not enabled floor sync (absent `place` => render nothing — never a "Remote"
+ * default; that would be surveillance-by-omission). `floorLabel` is appended for
+ * an OFFICE tag when known (e.g. "📍 Office · Floor 2"). Display-only: it mirrors
+ * the server-pushed tag and never derives presence from it (orthogonal).
+ */
+function placePill(place: PlayerSnapshot["place"], floorLabel?: string): HTMLElement | null {
+  if (place !== "OFFICE" && place !== "REMOTE") return null;
+  const pill = document.createElement("span");
+  pill.className = "place-pill";
+  pill.dataset.place = place;
+  if (place === "OFFICE") {
+    pill.textContent = floorLabel ? `📍 Office · ${floorLabel}` : "📍 Office";
+    pill.title = "Synced to your office network (you can turn this off in Settings)";
+  } else {
+    pill.textContent = "🏠 Remote";
+    pill.title = "Working remotely";
+  }
+  return pill;
+}
+
 function timeLeftLabel(endTime: number): string {
   const ms = endTime - Date.now();
   if (ms <= 0) return "ending…";
@@ -184,6 +206,14 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   document.addEventListener("click", onFloorDocClick);
   floorWidget.append(floorButton, floorMenu);
 
+  // --- Self location pill (OPT-IN floor sync) ------------------------------
+  // A compact, dismissible Office/Remote indicator for SELF, docked beside the
+  // floor indicator. Hidden when the user has not enabled floor sync (absent
+  // place). Display-only; the toggle lives in Settings (honest + revocable).
+  const selfPlace = document.createElement("div");
+  selfPlace.className = "hud-self-place";
+  selfPlace.hidden = true;
+
   // Status pill + dropdown
   const statusWrap = document.createElement("div");
   statusWrap.className = "hud-status";
@@ -238,7 +268,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   meetLinkAnchor.textContent = "🎥 Open Meet";
   meetLinkAnchor.hidden = true;
 
-  topBar.append(logo, areaName, floorWidget, statusWrap, meetingBtn, meetLinkAnchor);
+  topBar.append(logo, areaName, floorWidget, selfPlace, statusWrap, meetingBtn, meetLinkAnchor);
 
   // --- Right sidebar -------------------------------------------------------
   const sidebar = document.createElement("div");
@@ -497,6 +527,28 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     }
   }
 
+  /** Render the SELF Office/Remote indicator in the top bar (hidden if absent). */
+  function renderSelfPlace(state: UiState): void {
+    const self = store.self();
+    const place = self?.place;
+    if (place !== "OFFICE" && place !== "REMOTE") {
+      selfPlace.hidden = true;
+      selfPlace.innerHTML = "";
+      return;
+    }
+    // Resolve "Floor N" from self's floor for an OFFICE tag.
+    const floorLabel =
+      place === "OFFICE" ? floorNameFor(state, store.selfFloorId()) : undefined;
+    const pill = placePill(place, floorLabel);
+    selfPlace.innerHTML = "";
+    if (pill) {
+      selfPlace.appendChild(pill);
+      selfPlace.hidden = false;
+    } else {
+      selfPlace.hidden = true;
+    }
+  }
+
   function renderRoster(state: UiState): void {
     rosterBody.innerHTML = "";
     const hideNpcs = cb.isNpcHidden?.() ?? false;
@@ -575,6 +627,15 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
           floorTag.title = floorNameFor(state, pFloor);
           sub.append(floorTag);
         }
+        // OPT-IN physical-location pill (Office/Remote). Absent => render nothing.
+        // For an OFFICE tag, label the player's floor when the building is known.
+        const floorCountForPlace = state.building?.floors.length ?? 0;
+        const placeFloorLabel =
+          p.place === "OFFICE" && floorCountForPlace > 1
+            ? floorNameFor(state, pFloor)
+            : undefined;
+        const pill = placePill(p.place, placeFloorLabel);
+        if (pill) sub.append(pill);
         info.append(nameEl, sub);
         // ⓘ affordance opens the profile card (distinct from row-click = locate).
         const infoBtn = document.createElement("button");
@@ -685,6 +746,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     const self = store.self();
     areaName.textContent = state.selfArea || "Hallway";
     renderFloorWidget(state);
+    renderSelfPlace(state);
     renderStatusPill(self);
     renderMeeting(state);
     renderMeetingDetails(state.myMeeting);

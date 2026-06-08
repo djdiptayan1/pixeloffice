@@ -44,6 +44,26 @@ export interface PlayerSnapshot {
    */
   floorId?: string;
   /**
+   * The user's OPT-IN physical-location tag, derived SERVER-SIDE from the client
+   * IP only (never the WiFi SSID — browsers cannot read it). OPTIONAL and fully
+   * backward-compatible:
+   *   - absent  => the user has NOT enabled floor sync (the default), OR sync was
+   *                turned off. Render no location badge.
+   *   - "OFFICE" => the IP fell inside a configured office subnet/CIDR.
+   *   - "REMOTE" => the IP did not match any office range (working from home).
+   *
+   * This is ORTHOGONAL to `presence` (PresenceState): a person can be AVAILABLE
+   * AND "OFFICE", FOCUS AND "REMOTE", etc. The two never imply or override each
+   * other — `place` says WHERE the user physically is, `presence` says what they
+   * are DOING. The tag is set ONLY when the user explicitly enables sync and is
+   * cleared (back to absent) when they turn it off; it is never employer-forced.
+   *
+   * PRIVACY (plan.md "presence, not surveillance"): the server stores ONLY this
+   * transient tag + the current floor. It NEVER persists or logs the IP, and
+   * NEVER keeps a location history / movement trace / who-was-where-when.
+   */
+  place?: "OFFICE" | "REMOTE";
+  /**
    * True for ambient, server-driven office NPCs (not real users). OPTIONAL and
    * backward-compatible: absent/false means a human player. The client may use
    * it to label/hide NPCs; the server uses it to exclude them from human-only

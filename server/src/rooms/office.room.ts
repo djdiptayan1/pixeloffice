@@ -15,6 +15,7 @@
 // JOIN_EVENT / JOIN_MEETING message seats the sender at an anchor.
 // ---------------------------------------------------------------------------
 
+import type { IncomingMessage } from "node:http";
 import { Room, type Client } from "colyseus";
 import {
   C2S,
@@ -52,6 +53,8 @@ import {
   type PresencePayload,
   type PresenceSource,
   type SetStatusPayload,
+  type SetLocationSyncPayload,
+  type LocationPayload,
   type SocialEvent,
   type ToastPayload,
   type WelcomePayload,
@@ -68,6 +71,7 @@ import { TokenBucket } from "../http/rate-limit";
 import { SlotAllocator } from "./slot-allocator";
 import { NpcService, mulberry32, npcConfigFromEnv } from "../npcs/npc.service";
 import type { NpcEffect } from "../npcs/npc.service";
+import { clientIpFromRequest } from "../location/floor-location.adapter";
 
 const log = createLogger("room");
 
@@ -87,6 +91,13 @@ const CHAT_RATE = 5; // messages/sec
 const CHAT_WINDOW_MS = 1000;
 const ACTION_RATE = 10; // status/join/leave actions per window
 const ACTION_WINDOW_MS = 1000;
+
+// Same trust-proxy decision the REST rate limiter uses (index.ts). Only when the
+// server sits behind a vetted reverse proxy is X-Forwarded-For honored for the
+// OPT-IN floor-location classification; otherwise the raw socket peer is used.
+const TRUST_PROXY = ["true", "1", "yes"].includes(
+  (process.env.TRUST_PROXY ?? "").toLowerCase(),
+);
 
 export class OfficeRoom extends Room {
   maxClients = 120;
@@ -119,6 +130,16 @@ export class OfficeRoom extends Room {
   private readonly players = new Map<string, PlayerSnapshot>();
   /** sessionId -> stable userId (the calendar key; survives reconnect upstream). */
   private readonly sessionUser = new Map<string, string>();
+  /**
+   * sessionId -> the client IP captured in onAuth, for the OPT-IN floor-location
+   * classification ONLY. PRIVACY (plan Principle 2): this is transient in-memory
+   * state for the duration of the session, NEVER logged, NEVER persisted, NEVER
+   * put in any broadcast snapshot, and dropped on leave. It is read solely to
+   * classify Office/Remote when (and only when) the user enables floor sync.
+   */
+  private readonly sessionIp = new Map<string, string | undefined>();
+  /** sessionId -> whether the user has OPTED IN to floor sync (default FALSE). */
+  private readonly locationSync = new Map<string, boolean>();
   /** The desk seat a player spawned at (for optional return after meetings). */
   private readonly homeSeat = new Map<string, { x: number; y: number }>();
   /**
@@ -399,6 +420,23 @@ export class OfficeRoom extends Room {
   // Lifecycle
   // -------------------------------------------------------------------------
 
+  /**
+   * Colyseus hands the raw HTTP upgrade request here. We capture ONLY the client
+   * IP (honoring the trust-proxy decision) and stash it transiently for the
+   * OPT-IN floor-location classification. We do NOT authenticate here (auth lives
+   * in onJoin via the AuthProvider); returning true preserves the existing
+   * open-join behavior. PRIVACY: the IP is never logged/persisted here.
+   */
+  onAuth(client: Client, _options: unknown, request?: IncomingMessage): boolean {
+    const ip = clientIpFromRequest(
+      request?.headers,
+      request?.socket?.remoteAddress,
+      TRUST_PROXY,
+    );
+    this.sessionIp.set(client.sessionId, ip);
+    return true;
+  }
+
   async onJoin(client: Client, options: unknown): Promise<void> {
     // Authenticate (validates name/department/avatar; rejects garbage).
     const identity = await container.auth.authenticate(options);
@@ -415,6 +453,9 @@ export class OfficeRoom extends Room {
     const seat = this.assignSpawn(groundFloor, identity.department);
     this.homeSeat.set(client.sessionId, seat);
     this.sessionUser.set(client.sessionId, identity.userId);
+    // Floor sync is OPT-IN and OFF by default. `place` stays absent on the
+    // snapshot until the user explicitly enables sync (SET_LOCATION_SYNC).
+    this.locationSync.set(client.sessionId, false);
 
     // Per-session rate-limit buckets (drop floods rather than fan them out).
     const now = Date.now();
@@ -515,6 +556,10 @@ export class OfficeRoom extends Room {
 
     this.players.delete(sessionId);
     this.sessionUser.delete(sessionId);
+    // Drop the transient IP + sync flag (privacy: nothing about the IP outlives
+    // the session — it was never logged or persisted in the first place).
+    this.sessionIp.delete(sessionId);
+    this.locationSync.delete(sessionId);
     this.homeSeat.delete(sessionId);
     this.meetingSlots.releaseEverywhere(sessionId);
     this.moveBuckets.delete(sessionId);
@@ -568,6 +613,9 @@ export class OfficeRoom extends Room {
     this.onMessage(C2S.LEAVE_MEETING, (client) => this.handleLeaveMeeting(client));
     this.onMessage(C2S.UPDATE_PROFILE, (client, payload: UpdateProfilePayload) =>
       this.handleUpdateProfile(client, payload),
+    );
+    this.onMessage(C2S.SET_LOCATION_SYNC, (client, payload: SetLocationSyncPayload) =>
+      this.handleSetLocationSync(client, payload),
     );
     this.onMessage(C2S.JOIN_GAME, (client, payload: any) => this.handleJoinGame(client, payload));
     this.onMessage(C2S.LEAVE_GAME, (client, payload: any) => this.handleLeaveGame(client, payload));
@@ -756,6 +804,68 @@ export class OfficeRoom extends Room {
     };
     // Floor-scoped: only co-located players render this avatar.
     this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.PLAYER_UPDATED, updated);
+  }
+
+  /**
+   * Toggle OPT-IN physical-floor sync (human agency + privacy).
+   *
+   * ON (enabled=true): classify the user's IP (Office/Remote), tag the snapshot,
+   *   broadcast S2C.LOCATION (floor-scoped). If the classification is OFFICE and
+   *   the IP maps to a REAL floor different from the user's current one, perform
+   *   the SAME server-side floor change the elevator uses — this is CONSENTED
+   *   (the user flipped the switch), not surveillance. When no office subnets are
+   *   configured (Noop adapter) every IP classifies REMOTE and nothing moves.
+   * OFF (enabled=false): clear `place` back to absent, broadcast a CLEARED
+   *   S2C.LOCATION, and NEVER move the avatar.
+   *
+   * Counts as activity (clears auto-AWAY). Rejects NPCs. Rate-limited via the
+   * shared action bucket. PRIVACY: the IP is read for classification only and is
+   * never logged or persisted here.
+   */
+  private handleSetLocationSync(client: Client, payload: SetLocationSyncPayload): void {
+    if (!this.allow(this.actionBuckets, client.sessionId)) return;
+    const snap = this.players.get(client.sessionId);
+    if (!snap || snap.isNpc) return; // NPCs never sync a location
+    if (typeof payload?.enabled !== "boolean") return;
+
+    container.presence.activity(client.sessionId, Date.now());
+
+    if (!payload.enabled) {
+      // Turn sync OFF: clear the tag, tell co-located clients to drop the badge.
+      // Never moves the avatar.
+      this.locationSync.set(client.sessionId, false);
+      if (snap.place === undefined) return; // already off — nothing to broadcast
+      snap.place = undefined;
+      const cleared: LocationPayload = {
+        sessionId: client.sessionId,
+        place: "REMOTE", // legacy hint for older clients; `cleared` is authoritative
+        cleared: true,
+      };
+      this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.LOCATION, cleared);
+      return;
+    }
+
+    // Turn sync ON: classify the transient IP (never logged/persisted).
+    this.locationSync.set(client.sessionId, true);
+    const ip = this.sessionIp.get(client.sessionId);
+    const place = container.floorLocation.classify(ip);
+    snap.place = place;
+
+    // Broadcast the new tag FLOOR-SCOPED (co-located clients only).
+    const location: LocationPayload = { sessionId: client.sessionId, place };
+    this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.LOCATION, location);
+
+    // Consented floor move: only when OFFICE and the IP maps to a real floor that
+    // differs from the current one. Reuses the elevator's floor-change machinery
+    // (PLAYER_LEFT/JOINED + FLOOR_CHANGED). Human agency holds: the user opted in.
+    if (place !== "OFFICE") return;
+    const detected = container.floorLocation.detectFloorId(ip);
+    if (!detected || !this.floors.has(detected)) return;
+    const currentFloorId = snap.floorId ?? this.groundFloorId;
+    if (detected === currentFloorId) return;
+    const target = this.floors.get(detected)!;
+    const spawn = this.assignSpawn(target, snap.department);
+    this.changeFloor(client, snap, currentFloorId, detected, spawn.x, spawn.y, snap.dir);
   }
 
   private handleChat(client: Client, payload: ChatPayload): void {

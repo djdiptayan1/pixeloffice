@@ -15,6 +15,9 @@ import { CAMERA_ZOOM, ZOOM_MAX as ZOOM_MAX_CONST, ZOOM_MIN as ZOOM_MIN_CONST } f
 const ZOOM_KEY = "pixeloffice.settings.zoom.v2";
 const MOTION_KEY = "pixeloffice.settings.reducedMotion";
 const HIDE_NPC_KEY = "pixeloffice.settings.hideNpcs";
+// OPT-IN physical-floor sync. OFF by default; never set without the user flipping
+// the toggle (the constitution forbids employer-forced location tracking).
+const LOCATION_SYNC_KEY = "pixeloffice.settings.locationSync";
 
 // Slider bounds + default mirror the scene's camera constants.
 const ZOOM_MIN = ZOOM_MIN_CONST;
@@ -25,12 +28,21 @@ export interface SettingsValues {
   zoom: number;
   reducedMotion: boolean;
   hideNpcs: boolean;
+  /** OPT-IN: sync my floor to the office network I'm on. OFF by default. */
+  locationSync: boolean;
 }
 
 export interface SettingsCallbacks {
   onZoom(zoom: number): void;
   onReducedMotion(on: boolean): void;
   onHideNpcs(hidden: boolean): void;
+  /**
+   * The OPT-IN floor-sync toggle changed. Forwards the intent only — the actual
+   * C2S.SET_LOCATION_SYNC send + any consented floor move happen server-side via
+   * the wiring in main.ts. `enabled: true` may result in the server moving the
+   * avatar to the detected floor (consented because the user flipped this switch).
+   */
+  onLocationSync(enabled: boolean): void;
   /** Re-arm + start the onboarding tour ("Show tour" link). */
   onShowTour(): void;
 }
@@ -61,6 +73,7 @@ function readValues(): SettingsValues {
     zoom: clampZoom(Number(read(ZOOM_KEY) ?? ZOOM_DEFAULT)),
     reducedMotion: read(MOTION_KEY) === "1",
     hideNpcs: read(HIDE_NPC_KEY) === "1",
+    locationSync: read(LOCATION_SYNC_KEY) === "1",
   };
 }
 
@@ -159,6 +172,34 @@ export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): Setti
   });
   npcField.append(npcText, npcInput);
 
+  // --- Floor sync toggle (OPT-IN physical-location) -----------------------
+  // OFF by default. Browsers cannot read the WiFi SSID — detection is SERVER-SIDE
+  // from the client IP only. Turning it ON tags the user Office/Remote and, if
+  // their IP maps to a real floor, the server moves them there (consented: they
+  // flipped the switch). Privacy: we never store a location history. Fully
+  // revocable — turning it off clears the badge and never moves the avatar.
+  const locField = document.createElement("label");
+  locField.className = "settings-field settings-toggle settings-loc";
+  const locTextWrap = document.createElement("span");
+  locTextWrap.className = "settings-loc-text";
+  const locText = document.createElement("span");
+  locText.className = "settings-label";
+  locText.textContent = "📍 Sync my floor to where I'm sitting";
+  const locNote = document.createElement("span");
+  locNote.className = "settings-note";
+  locNote.textContent =
+    "Uses your office network to set your floor. Off when you're remote. We never store your location history.";
+  locTextWrap.append(locText, locNote);
+  const locInput = document.createElement("input");
+  locInput.type = "checkbox";
+  locInput.checked = state.locationSync;
+  locInput.addEventListener("change", () => {
+    state.locationSync = locInput.checked;
+    write(LOCATION_SYNC_KEY, state.locationSync ? "1" : "0");
+    cb.onLocationSync(state.locationSync);
+  });
+  locField.append(locTextWrap, locInput);
+
   // --- Show tour link -----------------------------------------------------
   const tourRow = document.createElement("div");
   tourRow.className = "settings-field";
@@ -172,7 +213,7 @@ export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): Setti
   });
   tourRow.appendChild(tourLink);
 
-  pop.append(heading, zoomField, motionField, npcField, tourRow);
+  pop.append(heading, zoomField, motionField, npcField, locField, tourRow);
 
   const wrap = document.createElement("div");
   wrap.className = "settings-wrap";
@@ -197,6 +238,12 @@ export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): Setti
       cb.onZoom(state.zoom);
       cb.onReducedMotion(state.reducedMotion);
       cb.onHideNpcs(state.hideNpcs);
+      // Re-assert the persisted floor-sync preference on every (re)boot: each new
+      // server session starts the user untagged, so if they previously opted IN we
+      // re-send the consent to restore their badge (and any consented floor move).
+      // We only re-send when ON — never auto-disable on the server (it's already
+      // off there by default), keeping reconnects idempotent and honest.
+      if (state.locationSync) cb.onLocationSync(true);
     },
     values(): SettingsValues {
       return { ...state };

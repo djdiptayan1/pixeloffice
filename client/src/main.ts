@@ -38,6 +38,7 @@ import {
   type WelcomePayload,
   type GameUpdatePayload,
   type FloorChangedPayload,
+  type LocationPayload,
   type Building,
   type Floor,
   type PlayerSnapshot,
@@ -452,6 +453,14 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
         hud?.render();
         minimap?.render();
       },
+      // OPT-IN floor sync. Forward the user's consent to the server over the LIVE
+      // connection. `enabled: true` may be followed by a consented S2C.FLOOR_CHANGED
+      // (server moves the avatar to the detected floor) + an S2C.LOCATION tagging
+      // the badge; `enabled: false` clears the tag and never moves the avatar.
+      // Both are handled idempotently in the bridge below. No-op pre-connect.
+      onLocationSync: (enabled) => {
+        activeConn?.send(C2S.SET_LOCATION_SYNC, { enabled });
+      },
       onShowTour: () => onboarding?.start(),
     });
   }
@@ -589,6 +598,19 @@ function registerBridge(conn: Connection): void {
   conn.on<GameUpdatePayload>(S2C.GAME_UPDATE, ({ game }) => {
     if (!store) return;
     store.setGame(game);
+  });
+
+  // OPT-IN physical-location tag changed for a co-located player (floor-scoped).
+  // Branch on `cleared` FIRST: a cleared event means sync was turned OFF — drop the
+  // badge (set place to absent), NEVER show "Remote" (the place hint on a cleared
+  // event is a legacy fallback only). Otherwise apply the Office/Remote tag. For
+  // SELF this is the confirmation the toggle took effect; turning sync off makes the
+  // badge disappear immediately (honest + revocable). A consented floor move (when
+  // enabling resolves to a different OFFICE floor) arrives as a separate
+  // S2C.FLOOR_CHANGED, handled identically to an elevator crossing above.
+  conn.on<LocationPayload>(S2C.LOCATION, ({ sessionId, place, cleared }) => {
+    if (!store) return;
+    store.setPlace(sessionId, cleared ? undefined : place);
   });
 
   // Floor change: sent ONLY to the player whose own avatar stepped onto a portal
