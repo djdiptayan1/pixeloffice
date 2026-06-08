@@ -16,6 +16,7 @@
 // Must be first: load .env before the container reads process.env.
 import "./load-env";
 import { createServer } from "node:http";
+import { networkInterfaces } from "node:os";
 import express from "express";
 import cors from "cors";
 import { Server } from "colyseus";
@@ -215,9 +216,14 @@ async function main(): Promise<void> {
 
   gameServer.define(ROOM_NAME, OfficeRoom);
 
+  // Bind on all interfaces (Node's default for listen(PORT)) so LAN devices can
+  // reach the API/ws at http://<lan-ip>:PORT, matching the client's host-derived
+  // dial target. Log the LAN address too so it's obvious the network is exposed.
   httpServer.listen(PORT, () => {
+    const lan = lanAddress();
     console.log(
       `[PixelOffice] server listening on http://localhost:${PORT} ` +
+        (lan ? `(LAN: http://${lan}:${PORT}) ` : "") +
         `(ws room "${ROOM_NAME}", REST under /api)`,
     );
   });
@@ -247,4 +253,15 @@ function readPort(): number {
   const raw = process.env.PORT;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SERVER_PORT;
+}
+
+/** First non-internal IPv4 address (the LAN IP teammates dial), or null if
+ *  none is found. Display-only — the server already binds on all interfaces. */
+function lanAddress(): string | null {
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const addr of addrs ?? []) {
+      if (addr.family === "IPv4" && !addr.internal) return addr.address;
+    }
+  }
+  return null;
 }
