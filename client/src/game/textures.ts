@@ -995,11 +995,50 @@ const FURNITURE_SPECS: Record<FurnitureKind, FurnSpec> = {
       }
       px(ctx, 6, H - 8, 2, 8, "#4a2f1a");
       px(ctx, W - 8, H - 8, 2, 8, "#4a2f1a");
-      
+
       outlineRect(ctx, 0, 10, 3, 10, "#5c3d22");
       px(ctx, 2, 16, 2, 4, "#5c3d22");
       outlineRect(ctx, W - 3, 10, 3, 10, "#5c3d22");
       px(ctx, W - 4, 16, 2, 4, "#5c3d22");
+    },
+  },
+  // The inter-floor portal marker. Rendered as an elevator door set INTO the
+  // wall/floor. It is a NON-SOLID walkable tile (a Portal in the shared model);
+  // the player steps onto it and the SERVER performs the floor change — the game
+  // never decides floor logic, it only draws the door + shows an interact hint.
+  // The lit "call" arrow flickers via the alt frame so it reads as active.
+  elevator: {
+    w: 1,
+    h: 1,
+    flicker: true,
+    draw(ctx, W, H, glow) {
+      transparent(ctx, W, H);
+      // Brushed-steel surround (the door frame in the wall).
+      outlineRect(ctx, 2, 0, W - 4, H - 1, "#8b95a3", "#3a4150");
+      px(ctx, 3, 1, W - 6, 1, "#aab4c2"); // top sheen on the frame
+      px(ctx, 3, H - 3, W - 6, 1, "#5b6675"); // bottom shade
+      // The two sliding doors with a centre seam.
+      const dx = 5;
+      const dw = W - 10;
+      outlineRect(ctx, dx, 3, dw, H - 7, "#b9c2cf", "#525c6b");
+      const mid = Math.floor(W / 2);
+      px(ctx, mid, 4, 1, H - 9, "#525c6b"); // centre seam
+      // Vertical brushed-metal striations on each door leaf.
+      for (let x = dx + 2; x < mid - 1; x += 2) px(ctx, x, 4, 1, H - 9, "#c8d1dd");
+      for (let x = mid + 2; x < dx + dw - 1; x += 2) px(ctx, x, 4, 1, H - 9, "#c8d1dd");
+      // Call panel + up arrow indicator beside the door (lights via glow frame).
+      const panelX = dx + dw + 0;
+      px(ctx, Math.min(panelX, W - 4), 6, 2, 6, "#2a2e36"); // panel housing
+      // Up arrow (a small triangle) — bright amber when "called", dim otherwise.
+      ctx.fillStyle = glow ? "#ffd24a" : "#7a6a2c";
+      ctx.beginPath();
+      ctx.moveTo(mid, 7);
+      ctx.lineTo(mid - 3, 11);
+      ctx.lineTo(mid + 3, 11);
+      ctx.closePath();
+      ctx.fill();
+      // Floor-level threshold strip so it reads as a doorway on the ground.
+      px(ctx, dx, H - 4, dw, 1, "#6b7585");
     },
   },
 };

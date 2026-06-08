@@ -23,8 +23,8 @@ import {
   AVATAR_IDS,
   DEPARTMENTS,
   anchorFor,
-  buildOfficeMap,
   isWalkable,
+  portalAt,
   PresenceState,
   type AvatarId,
   type Department,
@@ -40,7 +40,10 @@ import {
   type JoinMeetingPayload,
   type MeetingInfo,
   type MovePayload,
-  type OfficeMap,
+  type Building,
+  type Floor,
+  type BuildingSummary,
+  type FloorChangedPayload,
   type PlayerJoinedPayload,
   type PlayerLeftPayload,
   type PlayerMovedPayload,
@@ -63,6 +66,7 @@ import { container } from "../container";
 import { createLogger } from "../logging/logger";
 import { TokenBucket } from "../http/rate-limit";
 import { SlotAllocator } from "./slot-allocator";
+import { NpcService, mulberry32, npcConfigFromEnv } from "../npcs/npc.service";
 import type { NpcEffect } from "../npcs/npc.service";
 
 const log = createLogger("room");
@@ -87,7 +91,30 @@ const ACTION_WINDOW_MS = 1000;
 export class OfficeRoom extends Room {
   maxClients = 120;
 
-  private readonly map: OfficeMap = buildOfficeMap();
+  /**
+   * The active building captured at create. Live players keep this building for
+   * their whole session (changing the ACTIVE map via /api/maps applies to NEW
+   * rooms/joins only — documented in MULTIFLOOR-CONTRACT.md).
+   */
+  private readonly building: Building = container.maps.getActiveBuilding();
+  /** Fast floorId -> Floor lookup (a Floor IS an OfficeMap, so all map helpers work). */
+  private readonly floors = new Map<string, Floor>(
+    this.building.floors.map((f) => [f.id, f]),
+  );
+  /** The ground floor id — default spawn floor + the legacy single-floor target. */
+  private readonly groundFloorId: string =
+    (this.building.floors.find((f) => f.index === 0) ?? this.building.floors[0]).id;
+  /** Per-floor ambient NPC engines (each seeded from that floor's geometry). */
+  private readonly npcByFloor = new Map<string, NpcService>();
+  /** Reverse index: NPC sessionId -> floorId (NPCs never change floors). */
+  private readonly npcFloor = new Map<string, string>();
+  /**
+   * Floor an event belongs to (eventId -> floorId). Social events are per-floor:
+   * an event/meeting belongs to the floor it was created on. Admin REST creates
+   * events without a floor, so those default to the ground floor (the legacy
+   * single-floor behavior the smoke test asserts). Unmapped ids => ground.
+   */
+  private readonly eventFloor = new Map<string, string>();
   /** Live snapshots keyed by sessionId. The room is the source of truth. */
   private readonly players = new Map<string, PlayerSnapshot>();
   /** sessionId -> stable userId (the calendar key; survives reconnect upstream). */
@@ -180,13 +207,32 @@ export class OfficeRoom extends Room {
     this.wireServiceListeners();
     this.registerMessageHandlers();
 
-    // Spawn ambient NPCs so the office never feels empty. They are inserted
-    // directly into the authoritative player map BEFORE any client joins, so
-    // WELCOME naturally includes them (carrying isNpc=true) — no join broadcast
-    // is needed at create. They are server-driven ambience: they never join
-    // meetings, never touch HR, and never respond to humans.
-    for (const snap of container.npcs.spawnAll(Date.now())) {
-      this.players.set(snap.sessionId, snap);
+    // Spawn ambient NPCs so the office never feels empty — now PER FLOOR. They
+    // are inserted into the authoritative player map BEFORE any client joins, so
+    // WELCOME naturally includes the joiner's-floor NPCs (carrying isNpc=true).
+    // They are server-driven ambience: never join meetings, never touch HR,
+    // never respond to humans, and never change floors.
+    //
+    // The ground floor reuses the SHARED container NPC engine (built on the
+    // legacy ground geometry) so its existing behavior/tests are unchanged.
+    // Upper floors get fresh per-floor engines (distinct sessionIds via a
+    // floor-id prefix so they never collide across floors).
+    const npcCfg = npcConfigFromEnv(process.env);
+    const now0 = Date.now();
+    for (const floor of this.building.floors) {
+      let engine: NpcService;
+      if (floor.id === this.groundFloorId) {
+        engine = container.npcs; // shared engine = legacy ground behavior
+      } else {
+        engine = new NpcService(floor, mulberry32(npcCfg.seed + floor.index), npcCfg.count);
+      }
+      this.npcByFloor.set(floor.id, engine);
+      for (const snap of engine.spawnAll(now0)) {
+        const id = floor.id === this.groundFloorId ? snap.sessionId : `${floor.id}:${snap.sessionId}`;
+        const placed: PlayerSnapshot = { ...snap, sessionId: id, floorId: floor.id };
+        this.players.set(id, placed);
+        this.npcFloor.set(id, floor.id);
+      }
     }
 
     // The room is the ONLY clock reader. Services get `now` from here.
@@ -194,9 +240,14 @@ export class OfficeRoom extends Room {
       const now = Date.now();
       container.presence.tick(now);
       container.events.tick(now);
-      // Advance ambient NPCs and translate their effects to wire messages. The
-      // NPC service is framework-free; the room is the only Colyseus seam.
-      this.applyNpcEffects(container.npcs.tick(now, container.events.activeEvents(now)));
+      // Advance ambient NPCs PER FLOOR and translate their effects to wire
+      // messages (floor-scoped). The NPC service is framework-free; the room is
+      // the only Colyseus seam. Events are floor-scoped, so each floor's NPCs
+      // only ever see events on their own floor.
+      for (const [floorId, engine] of this.npcByFloor) {
+        const floorEvents = this.activeEventsOnFloor(floorId, now);
+        this.applyNpcEffects(engine.tick(now, floorEvents), floorId);
+      }
     }, TICK_MS);
   }
 
@@ -205,9 +256,16 @@ export class OfficeRoom extends Room {
    * wire broadcasts. NPCs are not real clients, so there is no `except` target —
    * every connected human should see them move/change presence/chat.
    */
-  private applyNpcEffects(effects: NpcEffect[]): void {
+  private applyNpcEffects(effects: NpcEffect[], floorId: string): void {
+    // The ground floor uses the shared engine whose sessionIds are stored as-is;
+    // upper floors prefix the engine sessionId with "<floorId>:". Resolve the
+    // authoritative key the same way it was inserted in onCreate.
+    const keyFor = (engineSessionId: string): string =>
+      floorId === this.groundFloorId ? engineSessionId : `${floorId}:${engineSessionId}`;
+
     for (const effect of effects) {
-      const snap = this.players.get(effect.sessionId);
+      const sessionId = keyFor(effect.sessionId);
+      const snap = this.players.get(sessionId);
       if (!snap || !snap.isNpc) continue; // only ever mutate NPC snapshots here
       switch (effect.kind) {
         case "move": {
@@ -215,33 +273,33 @@ export class OfficeRoom extends Room {
           snap.y = effect.y;
           snap.dir = effect.dir;
           const moved: PlayerMovedPayload = {
-            sessionId: effect.sessionId,
+            sessionId,
             x: effect.x,
             y: effect.y,
             dir: effect.dir,
             moving: effect.moving,
           };
-          this.broadcast(S2C.PLAYER_MOVED, moved);
+          this.broadcastToFloor(floorId, S2C.PLAYER_MOVED, moved);
           break;
         }
         case "presence": {
           snap.presence = effect.state;
           snap.source = effect.source;
           const payload: PresencePayload = {
-            sessionId: effect.sessionId,
+            sessionId,
             state: effect.state,
             source: effect.source,
           };
-          this.broadcast(S2C.PRESENCE, payload);
+          this.broadcastToFloor(floorId, S2C.PRESENCE, payload);
           break;
         }
         case "chat": {
           const out: ChatBroadcastPayload = {
-            sessionId: effect.sessionId,
+            sessionId,
             name: effect.name,
             text: effect.text,
           };
-          this.broadcast(S2C.CHAT, out);
+          this.broadcastToFloor(floorId, S2C.CHAT, out);
           break;
         }
       }
@@ -280,7 +338,8 @@ export class OfficeRoom extends Room {
       // PLAYER_JOINED would reference a session others do not yet know.
       if (this.joining.has(sessionId)) return;
       const payload: PresencePayload = { sessionId, state, source };
-      this.broadcast(S2C.PRESENCE, payload);
+      // Floor-scoped: only co-located players see this player's presence change.
+      this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.PRESENCE, payload);
     };
     presence.on("change", this.onPresenceChange);
 
@@ -304,23 +363,31 @@ export class OfficeRoom extends Room {
     presence.on("meeting-ended", this.onMeetingEnded);
 
     this.onEventCreated = (event: SocialEvent) => {
-      log.info("social event created", { type: event.type, title: event.title, area: event.areaName });
-      this.broadcast(S2C.EVENT_CREATED, { event });
+      // Events are per-floor. Admin REST creates them without a floor, so they
+      // belong to the ground floor (legacy single-floor behavior). The event's
+      // areaName must match an area on that floor's map for anchors to resolve.
+      const floorId = this.eventFloor.get(event.id) ?? this.groundFloorId;
+      this.eventFloor.set(event.id, floorId);
+      log.info("social event created", { type: event.type, title: event.title, area: event.areaName, floorId });
+      this.broadcastToFloor(floorId, S2C.EVENT_CREATED, { event });
       const toast: ToastPayload = {
         message: `☕ ${event.title} started — join in the ${event.areaName}!`,
         kind: "event",
       };
-      this.broadcast(S2C.TOAST, toast);
+      this.broadcastToFloor(floorId, S2C.TOAST, toast);
     };
     events.on("created", this.onEventCreated);
 
     this.onEventUpdated = (event: SocialEvent) => {
-      this.broadcast(S2C.EVENT_UPDATED, { event });
+      const floorId = this.eventFloor.get(event.id) ?? this.groundFloorId;
+      this.broadcastToFloor(floorId, S2C.EVENT_UPDATED, { event });
     };
     events.on("updated", this.onEventUpdated);
 
     this.onEventEnded = (eventId: string) => {
-      this.broadcast(S2C.EVENT_ENDED, { eventId });
+      const floorId = this.eventFloor.get(eventId) ?? this.groundFloorId;
+      this.eventFloor.delete(eventId);
+      this.broadcastToFloor(floorId, S2C.EVENT_ENDED, { eventId });
       // Presence recomputes on the next tick once participants are gone; force
       // an immediate resolve so leaving an event reflects instantly.
       container.presence.tick(Date.now());
@@ -343,7 +410,9 @@ export class OfficeRoom extends Room {
       avatarId: identity.avatarId,
     });
 
-    const seat = this.assignSpawn(identity.department);
+    // New joiners always spawn on the ground floor at a free desk seat (as today).
+    const groundFloor = this.floors.get(this.groundFloorId)!;
+    const seat = this.assignSpawn(groundFloor, identity.department);
     this.homeSeat.set(client.sessionId, seat);
     this.sessionUser.set(client.sessionId, identity.userId);
 
@@ -364,6 +433,7 @@ export class OfficeRoom extends Room {
       dir: "down",
       presence: PresenceState.AVAILABLE, // resolved immediately below
       source: "SYSTEM",
+      floorId: this.groundFloorId,
     };
 
     // Insert the snapshot BEFORE the immediate tick: the tick fires the shared
@@ -394,9 +464,11 @@ export class OfficeRoom extends Room {
 
     const welcome: WelcomePayload = {
       self: { ...snapshot },
-      players: this.othersOf(client.sessionId),
-      events: container.events.activeEvents(now),
+      // Floor-scoped: only co-located players (the joiner spawns on ground).
+      players: this.othersOnFloor(client.sessionId, this.groundFloorId),
+      events: this.activeEventsOnFloor(this.groundFloorId, now),
       meeting: currentMeeting,
+      building: this.buildingSummary(),
     };
     // Colyseus completes the matchmake/join response before the client wrapper
     // has a concrete Room instance to bind retained onMessage handlers to. Send
@@ -411,9 +483,9 @@ export class OfficeRoom extends Room {
       }
     }, 0);
 
-    // Tell everyone else this player joined (carries the resolved presence).
+    // Tell everyone ELSE ON THIS FLOOR the player joined (carries presence).
     const joined: PlayerJoinedPayload = { player: { ...snapshot } };
-    this.broadcastExcept(client, S2C.PLAYER_JOINED, joined);
+    this.broadcastToFloorExcept(client, this.groundFloorId, S2C.PLAYER_JOINED, joined);
 
     // Join complete: subsequent presence changes for this session broadcast.
     this.joining.delete(client.sessionId);
@@ -429,6 +501,7 @@ export class OfficeRoom extends Room {
   onLeave(client: Client): void {
     const sessionId = client.sessionId;
     const leaving = this.players.get(sessionId);
+    const leavingFloorId = leaving?.floorId ?? this.groundFloorId;
     log.info("player left", { name: leaving?.name, sessionId, online: this.players.size - 1 });
     container.presence.untrack(sessionId);
     container.events.removeParticipant(sessionId);
@@ -450,7 +523,8 @@ export class OfficeRoom extends Room {
     this.joining.delete(sessionId);
 
     const left: PlayerLeftPayload = { sessionId };
-    this.broadcast(S2C.PLAYER_LEFT, left);
+    // Floor-scoped: only co-located players need to forget this avatar.
+    this.broadcastToFloor(leavingFloorId, S2C.PLAYER_LEFT, left);
   }
 
   onDispose(): void {
@@ -520,6 +594,10 @@ export class OfficeRoom extends Room {
     const snap = this.players.get(client.sessionId);
     if (!snap) return;
 
+    const floorId = snap.floorId ?? this.groundFloorId;
+    const map = this.floors.get(floorId);
+    if (!map) return;
+
     const x = payload?.x;
     const y = payload?.y;
     const dir = payload?.dir;
@@ -529,7 +607,7 @@ export class OfficeRoom extends Room {
       Number.isInteger(x) &&
       Number.isInteger(y) &&
       isValidDir(dir) &&
-      isWalkable(this.map, x, y) &&
+      isWalkable(map, x, y) &&
       manhattan(snap.x, snap.y, x, y) <= 1;
 
     if (!valid) {
@@ -546,8 +624,74 @@ export class OfficeRoom extends Room {
     // Movement counts as activity (clears auto-AWAY). No surveillance beyond ts.
     container.presence.activity(client.sessionId, Date.now());
 
+    // Did this committed step land on a portal? If so, the player's OWN movement
+    // (human agency: never automatic) carries them to the target floor.
+    const portal = portalAt(map as Floor, x, y);
+    if (portal && this.floors.has(portal.toFloorId)) {
+      // Broadcast the final step on the OLD floor first so co-located players
+      // see the avatar reach the portal tile, then perform the crossing.
+      const moved: PlayerMovedPayload = { sessionId: client.sessionId, x, y, dir, moving: false };
+      this.broadcastToFloorExcept(client, floorId, S2C.PLAYER_MOVED, moved);
+      this.changeFloor(client, snap, floorId, portal.toFloorId, portal.toX, portal.toY, dir);
+      return;
+    }
+
     const moved: PlayerMovedPayload = { sessionId: client.sessionId, x, y, dir, moving };
-    this.broadcastExcept(client, S2C.PLAYER_MOVED, moved);
+    this.broadcastToFloorExcept(client, floorId, S2C.PLAYER_MOVED, moved);
+  }
+
+  /**
+   * Move a player from one floor to another after they stepped onto a portal.
+   * Human agency is preserved: this ONLY ever runs as the direct result of the
+   * player's own committed MOVE onto a portal tile — never automatically.
+   *
+   * Sequencing:
+   *   - PLAYER_LEFT to the OLD floor's other occupants (the avatar is gone).
+   *   - mutate the snapshot's floor + position.
+   *   - PLAYER_JOINED to the NEW floor's other occupants (the avatar arrives).
+   *   - FLOOR_CHANGED to the mover with the new floor's full player + event set.
+   */
+  private changeFloor(
+    client: Client,
+    snap: PlayerSnapshot,
+    fromFloorId: string,
+    toFloorId: string,
+    toX: number,
+    toY: number,
+    dir: Direction,
+  ): void {
+    const now = Date.now();
+
+    // Tell the OLD floor this avatar left it.
+    const left: PlayerLeftPayload = { sessionId: client.sessionId };
+    this.broadcastToFloorExcept(client, fromFloorId, S2C.PLAYER_LEFT, left);
+
+    // Apply the crossing to the authoritative snapshot.
+    snap.floorId = toFloorId;
+    snap.x = toX;
+    snap.y = toY;
+    snap.dir = dir;
+
+    // Tell the NEW floor this avatar arrived.
+    const joined: PlayerJoinedPayload = { player: { ...snap } };
+    this.broadcastToFloorExcept(client, toFloorId, S2C.PLAYER_JOINED, joined);
+
+    // Tell the mover about their new surroundings (full re-sync of the floor).
+    const payload: FloorChangedPayload = {
+      selfFloorId: toFloorId,
+      x: toX,
+      y: toY,
+      dir,
+      players: this.othersOnFloor(client.sessionId, toFloorId),
+      events: this.activeEventsOnFloor(toFloorId, now),
+    };
+    client.send(S2C.FLOOR_CHANGED, payload);
+
+    log.info("player changed floor", {
+      sessionId: client.sessionId,
+      from: fromFloorId,
+      to: toFloorId,
+    });
   }
 
   private handleSetStatus(client: Client, payload: SetStatusPayload): void {
@@ -610,7 +754,8 @@ export class OfficeRoom extends Room {
       department: snap.department,
       avatarId: snap.avatarId,
     };
-    this.broadcast(S2C.PLAYER_UPDATED, updated);
+    // Floor-scoped: only co-located players render this avatar.
+    this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.PLAYER_UPDATED, updated);
   }
 
   private handleChat(client: Client, payload: ChatPayload): void {
@@ -624,7 +769,8 @@ export class OfficeRoom extends Room {
     container.presence.activity(client.sessionId, Date.now());
 
     const out: ChatBroadcastPayload = { sessionId: client.sessionId, name: snap.name, text };
-    this.broadcast(S2C.CHAT, out);
+    // Floor-scoped: chat is local to the floor the speaker stands on.
+    this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.CHAT, out);
   }
 
   private handleEmote(client: Client, payload: EmotePayload): void {
@@ -640,9 +786,9 @@ export class OfficeRoom extends Room {
     // Emoting counts as activity (clears auto-AWAY), like chat/status.
     container.presence.activity(client.sessionId, Date.now());
 
-    // Broadcast to ALL including the sender (they want to see their own bubble).
+    // Broadcast to ALL ON THIS FLOOR including the sender (own bubble).
     const out: EmoteBroadcastPayload = { sessionId: client.sessionId, emote };
-    this.broadcast(S2C.EMOTE, out);
+    this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.EMOTE, out);
   }
 
   private handleJoinEvent(client: Client, payload: JoinEventPayload): void {
@@ -658,12 +804,17 @@ export class OfficeRoom extends Room {
     const result = container.events.join(eventId, client.sessionId, now);
     if (!result) return;
 
-    const anchor = anchorFor(this.map, result.event.areaName, result.anchorIndex);
+    // Seat the player on the floor the event belongs to. They must already be on
+    // that floor (the client only shows events for the floor it is rendering).
+    const snap = this.players.get(client.sessionId);
+    const floorId = this.eventFloor.get(eventId) ?? snap?.floorId ?? this.groundFloorId;
+    const map = this.floors.get(floorId) ?? this.floors.get(this.groundFloorId)!;
+    const anchor = anchorFor(map, result.event.areaName, result.anchorIndex);
     this.teleport(client.sessionId, anchor.x, anchor.y);
 
-    // Teleport visible to ALL (including the sender — they clicked Join).
+    // Teleport visible to ALL ON THE FLOOR (including the sender — they clicked Join).
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: anchor.x, y: anchor.y };
-    this.broadcast(S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(floorId, S2C.PLAYER_TELEPORTED, tp);
 
     // Immediate tick so BREAK/EVENT presence is instant.
     container.presence.tick(Date.now());
@@ -700,15 +851,24 @@ export class OfficeRoom extends Room {
     if (!meeting || meeting.id !== meetingId) return;
 
     // Allocate the lowest free seat slot for this meeting (idempotent on
-    // re-join; freed slots are reused without colliding with an occupant).
+    // re-join; freed slots are reused without colliding with an occupant). The
+    // meeting room is seated on the player's CURRENT floor (meetings are
+    // per-floor; the meeting room name resolves against that floor's anchors,
+    // falling back to the ground floor if the player's floor lacks the room).
+    const snap = this.players.get(client.sessionId);
+    const floorId = snap?.floorId ?? this.groundFloorId;
+    let map = this.floors.get(floorId) ?? this.floors.get(this.groundFloorId)!;
+    if (!map.anchors[meeting.roomName]) {
+      map = this.floors.get(this.groundFloorId)!;
+    }
     const seatIndex = this.meetingSlots.assign(meeting.id, client.sessionId);
-    const anchor = anchorFor(this.map, meeting.roomName, seatIndex);
+    const anchor = anchorFor(map, meeting.roomName, seatIndex);
     this.teleport(client.sessionId, anchor.x, anchor.y);
 
-    // Visible to ALL. Do NOT change manual status — IN_MEETING comes from the
-    // calendar source already (the presence engine handles it).
+    // Visible to ALL ON THE FLOOR. Do NOT change manual status — IN_MEETING comes
+    // from the calendar source already (the presence engine handles it).
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: anchor.x, y: anchor.y };
-    this.broadcast(S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(snap?.floorId ?? this.groundFloorId, S2C.PLAYER_TELEPORTED, tp);
   }
 
   private handleLeaveMeeting(client: Client): void {
@@ -721,36 +881,48 @@ export class OfficeRoom extends Room {
     this.meetingSlots.releaseEverywhere(client.sessionId);
     const seat = this.homeSeat.get(client.sessionId);
     if (!seat) return;
+    const snap = this.players.get(client.sessionId);
+    // The home seat is on the ground floor. If the player wandered to another
+    // floor, returning them to their desk also returns them to the ground floor.
+    if (snap && (snap.floorId ?? this.groundFloorId) !== this.groundFloorId) {
+      this.changeFloor(client, snap, snap.floorId ?? this.groundFloorId, this.groundFloorId, seat.x, seat.y, "down");
+      return;
+    }
     this.teleport(client.sessionId, seat.x, seat.y);
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: seat.x, y: seat.y };
-    this.broadcast(S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(this.groundFloorId, S2C.PLAYER_TELEPORTED, tp);
   }
 
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
 
-  /** First free desk seat in the department, else the fallback spawn. */
-  private assignSpawn(department: PlayerSnapshot["department"]): { x: number; y: number } {
+  /**
+   * First free desk seat in the department on the given floor, else a ring-scan
+   * fallback around that floor's spawn. Occupancy is scoped to players ON THAT
+   * FLOOR so two players on different floors may share a tile coordinate.
+   */
+  private assignSpawn(map: Floor, department: PlayerSnapshot["department"]): { x: number; y: number } {
     const occupied = new Set<string>();
     for (const p of this.players.values()) {
+      if ((p.floorId ?? this.groundFloorId) !== map.id) continue;
       occupied.add(`${p.x},${p.y}`);
     }
-    for (const desk of this.map.desks) {
+    for (const desk of map.desks) {
       if (desk.department !== department) continue;
       const key = `${desk.seatX},${desk.seatY}`;
-      if (!occupied.has(key) && isWalkable(this.map, desk.seatX, desk.seatY)) {
+      if (!occupied.has(key) && isWalkable(map, desk.seatX, desk.seatY)) {
         return { x: desk.seatX, y: desk.seatY };
       }
     }
     // No free desk: fall back to the first walkable, unoccupied tile found by a
     // deterministic ring scan outward from the fallback spawn so overflow users
     // do not stack on the exact same tile.
-    const { x: sx, y: sy } = this.map.spawn;
-    if (!occupied.has(`${sx},${sy}`) && isWalkable(this.map, sx, sy)) {
+    const { x: sx, y: sy } = map.spawn;
+    if (!occupied.has(`${sx},${sy}`) && isWalkable(map, sx, sy)) {
       return { x: sx, y: sy };
     }
-    for (let r = 1; r < Math.max(this.map.width, this.map.height); r++) {
+    for (let r = 1; r < Math.max(map.width, map.height); r++) {
       for (let dy = -r; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
           // Only the perimeter of the current ring (avoids re-checking inner rings).
@@ -758,7 +930,7 @@ export class OfficeRoom extends Room {
           const x = sx + dx;
           const y = sy + dy;
           if (occupied.has(`${x},${y}`)) continue;
-          if (isWalkable(this.map, x, y)) return { x, y };
+          if (isWalkable(map, x, y)) return { x, y };
         }
       }
     }
@@ -779,20 +951,61 @@ export class OfficeRoom extends Room {
     return Array.from(this.players.values()).map((p) => ({ ...p }));
   }
 
-  private othersOf(sessionId: string): PlayerSnapshot[] {
+  /** Other players (excluding `sessionId`) currently on `floorId`. */
+  private othersOnFloor(sessionId: string, floorId: string): PlayerSnapshot[] {
     const out: PlayerSnapshot[] = [];
     for (const [id, p] of this.players) {
-      if (id !== sessionId) out.push({ ...p });
+      if (id === sessionId) continue;
+      if ((p.floorId ?? this.groundFloorId) !== floorId) continue;
+      out.push({ ...p });
     }
     return out;
+  }
+
+  /** Active social events scoped to a floor (admin events default to ground). */
+  private activeEventsOnFloor(floorId: string, now: number): SocialEvent[] {
+    return container.events.activeEvents(now).filter((e) => {
+      const ef = this.eventFloor.get(e.id) ?? this.groundFloorId;
+      return ef === floorId;
+    });
+  }
+
+  /** The active building's floor list (id/name/index) for the WELCOME payload. */
+  private buildingSummary(): BuildingSummary {
+    return {
+      id: this.building.id,
+      name: this.building.name,
+      floors: this.building.floors.map((f) => ({ id: f.id, name: f.name, index: f.index })),
+    };
   }
 
   private clientFor(sessionId: string): Client | undefined {
     return this.clients.find((c) => c.sessionId === sessionId);
   }
 
-  private broadcastExcept(client: Client, type: string, message: unknown): void {
-    this.broadcast(type, message, { except: client });
+  /** The floorId a given client (human) is currently on. */
+  private floorIdOfClient(client: Client): string {
+    return this.players.get(client.sessionId)?.floorId ?? this.groundFloorId;
+  }
+
+  /** Send a message only to HUMAN clients currently on `floorId`. */
+  private broadcastToFloor(floorId: string, type: string, message: unknown): void {
+    for (const c of this.clients) {
+      if (this.floorIdOfClient(c) === floorId) c.send(type, message);
+    }
+  }
+
+  /** Send to HUMAN clients on `floorId` except `except`. */
+  private broadcastToFloorExcept(
+    except: Client,
+    floorId: string,
+    type: string,
+    message: unknown,
+  ): void {
+    for (const c of this.clients) {
+      if (c === except) continue;
+      if (this.floorIdOfClient(c) === floorId) c.send(type, message);
+    }
   }
 
   // -------------------------------------------------------------------------

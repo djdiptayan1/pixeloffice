@@ -57,6 +57,7 @@ import type { Database } from "./persistence/database";
 import type { RedisStore } from "./persistence/redis";
 import { buildOfficeMap } from "@pixeloffice/shared";
 import { NpcService, mulberry32, npcConfigFromEnv } from "./npcs/npc.service";
+import { InMemoryMapRepository, type MapRepository } from "./maps/map-repository";
 import type { OfficeRoom } from "./rooms/office.room";
 
 // --- Synchronous, framework-free services (shared by REST + room) ----------
@@ -96,6 +97,12 @@ const calendar: CalendarAdapter = googleCalendar
   : mockCalendar;
 const events = new EventService();
 const presence = new PresenceService(calendar, events);
+
+// --- Multi-floor building / map repository ---------------------------------
+// Source of the ACTIVE building (a stack of floors). The room reads the active
+// building here at create; Map Studio lists/saves/activates via /api/maps. The
+// default seed is the 3-floor building. In-memory in dev (DB/file-backed in prod).
+const maps: MapRepository = new InMemoryMapRepository();
 
 // --- Ambient NPCs (so the office never feels empty) ------------------------
 // Framework-free behavior engine. Owns a seeded PRNG (NPC_SEED, default 42) so
@@ -198,6 +205,8 @@ export const container = {
   presence,
   /** Ambient office NPCs (framework-free; the room wires effects to the wire). */
   npcs,
+  /** Active building + saved maps (the room reads the active building at create). */
+  maps,
   auth,
   /** Auth config (providers map, jwt service, RBAC, AUTH_REQUIRED gate). */
   authConfig,

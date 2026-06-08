@@ -35,6 +35,15 @@ export interface PlayerSnapshot {
   presence: PresenceState;
   source: PresenceSource;
   /**
+   * The floor this player is currently on (Building.floors[].id, e.g. "ground").
+   * The server ALWAYS sets this going forward; it is the migration field for
+   * multi-floor support. Declared OPTIONAL only for backward compatibility so
+   * pre-multifloor snapshot literals (tests, fixtures) still type-check — any
+   * consumer that omits it should treat an absent value as the ground floor
+   * ("ground"). The wire always carries a concrete floorId.
+   */
+  floorId?: string;
+  /**
    * True for ambient, server-driven office NPCs (not real users). OPTIONAL and
    * backward-compatible: absent/false means a human player. The client may use
    * it to label/hide NPCs; the server uses it to exclude them from human-only

@@ -20,9 +20,11 @@ import {
   isWalkable,
   type Direction,
   type Emote,
+  type Floor,
   type FurnitureKind,
   type OfficeMap,
   type PlayerSnapshot,
+  type Portal,
 } from "@pixeloffice/shared";
 import {
   BUBBLE_MAX_CHARS,
@@ -35,6 +37,7 @@ import {
   DEPTH_RUG,
   DEPTH_WALL,
   EMOTE_MS,
+  FLOOR_FADE_MS,
   PAN_MS,
   PAN_RESUME_MS,
   STEP_MS,
@@ -105,11 +108,24 @@ const BADGE_FOR: Record<PresenceState, string> = {
 };
 
 export class OfficeScene extends Phaser.Scene {
-  private map: OfficeMap = buildOfficeMap();
+  // The geometry currently being rendered. Defaults to the legacy single-floor
+  // map (back-compat: a caller that never supplies a Floor keeps the old office).
+  // A Floor is a structural superset of OfficeMap, so this holds either.
+  private map: OfficeMap | Floor = buildOfficeMap();
+  /** Portals on the current floor (empty for a plain single-floor OfficeMap). */
+  private portals: Portal[] = [];
+  /** The current floor id (for the UI bridge / minimap). Defaults to "ground". */
+  private floorId = "ground";
+  // Every world-layer game object built by drawWorld(), tracked so a floor swap
+  // can tear the old floor down cleanly before rebuilding (avatars are separate).
+  private worldObjects: Phaser.GameObjects.GameObject[] = [];
+  private flickerTimer?: Phaser.Time.TimerEvent;
   private avatars = new Map<string, Avatar>();
   private selfId = "";
   private selfStart!: PlayerSnapshot;
   private cb!: SceneCallbacks;
+  /** The portal the local avatar is currently standing on / next to (hint). */
+  private currentPortalLabel: string | null = null;
 
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: Record<"up" | "down" | "left" | "right", Phaser.Input.Keyboard.Key>;
@@ -132,10 +148,21 @@ export class OfficeScene extends Phaser.Scene {
     super({ key: "office" });
   }
 
-  init(data: { self: PlayerSnapshot; cb: SceneCallbacks }): void {
+  init(data: { self: PlayerSnapshot; cb: SceneCallbacks; floor?: Floor }): void {
     this.selfStart = data.self;
     this.selfId = data.self.sessionId;
     this.cb = data.cb;
+    // If the UI bridge already fetched the player's floor geometry (from
+    // GET /api/maps/active) it passes it here so create() renders the correct
+    // floor immediately. Otherwise we fall back to the legacy single-floor map
+    // and the bridge swaps in the real floor via setActiveFloor() afterwards.
+    if (data.floor) {
+      this.map = data.floor;
+      this.portals = data.floor.portals ?? [];
+      this.floorId = data.floor.id;
+    } else {
+      this.floorId = data.self.floorId ?? "ground";
+    }
   }
 
   preload(): void {
@@ -216,6 +243,12 @@ export class OfficeScene extends Phaser.Scene {
   // World rendering
   // -------------------------------------------------------------------------
 
+  /** Track a world-layer object so a floor swap can tear it down later. */
+  private track<T extends Phaser.GameObjects.GameObject>(obj: T): T {
+    this.worldObjects.push(obj);
+    return obj;
+  }
+
   private drawWorld(): void {
     // Floors: paint each area's floor, hallway elsewhere. Pick one of the
     // deterministic variant tiles per position so large floors don't band.
@@ -228,6 +261,7 @@ export class OfficeScene extends Phaser.Scene {
         const key = floorVariantForTile(base, x, y);
         const img = this.add.image(x * TILE, y * TILE, key).setOrigin(0, 0);
         img.setDepth(DEPTH_FLOOR);
+        this.track(img);
       }
     }
 
@@ -247,6 +281,7 @@ export class OfficeScene extends Phaser.Scene {
       );
       label.setLetterSpacing?.(2);
       label.setOrigin(0.5, 0.5).setAlpha(0.62).setDepth(DEPTH_AREA_LABEL);
+      this.track(label);
     }
 
     // Walls. Outer north wall tiles (y === 0, excluding corners) deterministically
@@ -256,7 +291,7 @@ export class OfficeScene extends Phaser.Scene {
       const northOuter = w.y === 0 && w.x > 1 && w.x < lastX - 1;
       const isWindow = northOuter && (w.x * 7 + w.y * 13) % 3 === 0;
       const tex = isWindow ? TEX.wallWindow : TEX.wall;
-      this.add.image(w.x * TILE, w.y * TILE, tex).setOrigin(0, 0).setDepth(DEPTH_WALL);
+      this.track(this.add.image(w.x * TILE, w.y * TILE, tex).setOrigin(0, 0).setDepth(DEPTH_WALL));
     }
 
     // Furniture (y-sorted so taller pieces overlap correctly).
@@ -270,14 +305,36 @@ export class OfficeScene extends Phaser.Scene {
       }
       if (furnitureFlickers(f.kind)) this.flickerPieces.push({ img, kind: f.kind });
       if (f.kind === "coffee-machine") this.spawnSteam(f.x, f.y);
+      this.track(img);
     }
 
+    // Portals: a soft glowing pad on the floor under each elevator/stairs tile so
+    // the player can see where the inter-floor link is even if no elevator
+    // furniture was seeded there. Walking onto it is a normal MOVE; the SERVER
+    // performs the floor change (human agency — the game decides no floor logic).
+    this.drawPortalPads();
+
     // Drive the cheap 2-frame glow flicker on a slow shared timer.
-    this.time.addEvent({
+    this.flickerTimer = this.time.addEvent({
       delay: 480,
       loop: true,
       callback: () => this.tickFlicker(),
     });
+  }
+
+  /** Draw a subtle glowing pad marker on each portal tile (under furniture). */
+  private drawPortalPads(): void {
+    for (const p of this.portals) {
+      const g = this.add.graphics();
+      const cx = p.x * TILE + TILE / 2;
+      const cy = p.y * TILE + TILE / 2;
+      g.fillStyle(0xffd24a, 0.12);
+      g.fillCircle(cx, cy, TILE * 0.46);
+      g.lineStyle(1, 0xffd24a, 0.35);
+      g.strokeCircle(cx, cy, TILE * 0.42);
+      g.setDepth(DEPTH_RUG); // above the floor, below furniture/avatars
+      this.track(g);
+    }
   }
 
   /** Toggle glowing-screen / LED furniture between its base + alt texture. */
@@ -512,34 +569,67 @@ export class OfficeScene extends Phaser.Scene {
       this.lastArea = name;
       this.cb.onAreaChange(name);
     }
+    // Elevator/portal hint takes priority over lounge-game prompts: if the player
+    // is on or next to a portal, advertise the destination. Stepping onto the
+    // portal tile is a NORMAL move — the SERVER performs the floor change and
+    // replies FLOOR_CHANGED (human agency: nothing auto-moves the avatar).
+    if (this.checkPortalProximity(a.snap.x, a.snap.y)) return;
     this.checkGameProximity(a.snap.x, a.snap.y);
+  }
+
+  /** True if a portal hint was shown for (x,y). Hint shows when on/adjacent. */
+  private checkPortalProximity(x: number, y: number): boolean {
+    if (!this.cb.onInteractPrompt || this.portals.length === 0) return false;
+    const near = this.portals.find(
+      (p) => Math.abs(p.x - x) + Math.abs(p.y - y) <= 1,
+    );
+    if (!near) {
+      if (this.currentPortalLabel !== null) {
+        this.currentPortalLabel = null;
+        // Clearing here is handled by the lounge check that runs next; we just
+        // forget the label so re-entry re-announces it.
+      }
+      return false;
+    }
+    const onTile = near.x === x && near.y === y;
+    const label = near.label ?? `Elevator → ${near.toFloorId}`;
+    const text = onTile ? `${label} — step in to ride` : `${label} ↪ walk in`;
+    this.currentPortalLabel = label;
+    this.currentPromptGameId = undefined; // not an [E] interaction
+    this.cb.onInteractPrompt(text);
+    return true;
   }
 
   private checkGameProximity(x: number, y: number): void {
     if (!this.cb.onInteractPrompt) return;
 
-    // Ping Pong: x: 38..40, y: 21..22
-    if (x >= 37 && x <= 41 && y >= 20 && y <= 23) {
-      this.currentPromptGameId = "lounge:ping-pong";
-      this.cb.onInteractPrompt("Press [E] to play Table Tennis", this.currentPromptGameId);
-      return;
-    }
+    // Lounge games physically live only on the ground floor (per the multi-floor
+    // contract). On any other floor these tiles are ordinary, so skip the prompts.
+    if (this.floorId === "ground") {
+      // Ping Pong: x: 38..40, y: 21..22
+      if (x >= 37 && x <= 41 && y >= 20 && y <= 23) {
+        this.currentPromptGameId = "lounge:ping-pong";
+        this.cb.onInteractPrompt("Press [E] to play Table Tennis", this.currentPromptGameId);
+        return;
+      }
 
-    // Arcade Cabinet: x: 35, y: 15
-    if (Math.abs(x - 35) <= 1 && Math.abs(y - 15) <= 1) {
-      this.currentPromptGameId = "lounge:connect-four";
-      this.cb.onInteractPrompt("Press [E] to play Connect Four", this.currentPromptGameId);
-      return;
-    }
+      // Arcade Cabinet: x: 35, y: 15
+      if (Math.abs(x - 35) <= 1 && Math.abs(y - 15) <= 1) {
+        this.currentPromptGameId = "lounge:connect-four";
+        this.cb.onInteractPrompt("Press [E] to play Connect Four", this.currentPromptGameId);
+        return;
+      }
 
-    // Chess Table: x: 45, y: 15
-    if (Math.abs(x - 45) <= 1 && Math.abs(y - 15) <= 1) {
-      this.currentPromptGameId = "lounge:tic-tac-toe";
-      this.cb.onInteractPrompt("Press [E] to play Tic-Tac-Toe", this.currentPromptGameId);
-      return;
+      // Chess Table: x: 45, y: 15
+      if (Math.abs(x - 45) <= 1 && Math.abs(y - 15) <= 1) {
+        this.currentPromptGameId = "lounge:tic-tac-toe";
+        this.cb.onInteractPrompt("Press [E] to play Tic-Tac-Toe", this.currentPromptGameId);
+        return;
+      }
     }
 
     this.currentPromptGameId = undefined;
+    this.currentPortalLabel = null;
     this.cb.onInteractPrompt(null);
   }
 
@@ -556,6 +646,86 @@ export class OfficeScene extends Phaser.Scene {
 
   setInputLocked(locked: boolean): void {
     this.inputLocked = locked;
+  }
+
+  /**
+   * Swap the rendered world to a different floor (multi-floor support). The UI
+   * bridge calls this on FLOOR_CHANGED (and may call it once right after WELCOME
+   * to load the player's authoritative floor geometry fetched from /api/maps).
+   *
+   * It tears down the current floor's world + ALL avatars, rebuilds the world for
+   * the new floor, re-creates the local avatar at `self` (x/y already set by the
+   * server for the destination floor), adds every co-located remote player, and
+   * snaps the camera to the local avatar behind a quick fade (instant under
+   * reduced-motion). Human agency is intact: the SERVER decided the floor change
+   * after the player's own committed step onto a portal; this only renders it.
+   *
+   * @param floor  the destination Floor geometry (areas/solid/desks/portals).
+   * @param self   the local player's snapshot ON the new floor (authoritative x/y/dir).
+   * @param others co-located remote players already on the new floor.
+   */
+  apiLoadFloor(floor: Floor, self: PlayerSnapshot, others: PlayerSnapshot[]): void {
+    const swap = () => this.rebuildForFloor(floor, self, others);
+    const cam = this.cameras.main;
+    if (this.reducedMotion) {
+      swap();
+      return;
+    }
+    // Fade out, rebuild while black, then fade back in (a clean lift feel).
+    cam.fadeOut(FLOOR_FADE_MS, 14, 17, 22);
+    cam.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      swap();
+      cam.fadeIn(FLOOR_FADE_MS, 14, 17, 22);
+    });
+  }
+
+  /** Tear down the old floor + every avatar, then rebuild for the new floor. */
+  private rebuildForFloor(floor: Floor, self: PlayerSnapshot, others: PlayerSnapshot[]): void {
+    // 1. Remove every avatar (local + remote) — they belong to the old floor.
+    for (const sessionId of [...this.avatars.keys()]) this.apiRemovePlayer(sessionId);
+
+    // 2. Tear down the old world layer (floors, walls, furniture, labels, pads).
+    this.teardownWorld();
+
+    // 3. Point the scene at the new floor geometry.
+    this.map = floor;
+    this.portals = floor.portals ?? [];
+    this.floorId = floor.id;
+    this.selfStart = self;
+    this.lastArea = "__force__";
+    this.currentPortalLabel = null;
+    this.currentPromptGameId = undefined;
+    this.cb.onInteractPrompt?.(null);
+
+    // 4. Rebuild the world + camera bounds for the new floor.
+    this.drawWorld();
+    this.cameras.main.setBounds(0, 0, this.map.width * TILE, this.map.height * TILE);
+
+    // 5. Re-create the local avatar at the server-authoritative destination tile
+    //    and snap the camera straight to it (no auto-walk — it just appears).
+    this.spawnAvatar(self, true);
+    const local = this.avatars.get(this.selfId)!;
+    this.cameras.main.stopFollow();
+    this.cameras.main.centerOn(local.sprite.x, local.sprite.y);
+    this.cameras.main.startFollow(local.sprite, true, 0.15, 0.15);
+
+    // 6. Add the co-located remote players already on the new floor.
+    for (const p of others) this.apiAddPlayer(p);
+
+    // 7. Announce the new area + portal/lounge prompts.
+    this.reportArea(local);
+  }
+
+  /** Destroy everything drawWorld() created so the next floor starts clean. */
+  private teardownWorld(): void {
+    this.flickerTimer?.remove();
+    this.flickerTimer = undefined;
+    this.flickerPieces = [];
+    this.flickerOn = false;
+    for (const e of this.steamEmitters) e.destroy();
+    this.steamEmitters = [];
+    for (const obj of this.worldObjects) obj.destroy();
+    this.worldObjects = [];
   }
 
   apiAddPlayer(snap: PlayerSnapshot): void {
@@ -705,6 +875,11 @@ export class OfficeScene extends Phaser.Scene {
       if (on) emitter.stop();
       else emitter.start();
     }
+  }
+
+  /** The floor id currently rendered (for the UI minimap / floor readout). */
+  apiCurrentFloorId(): string {
+    return this.floorId;
   }
 
   private setPresenceBadge(a: Avatar, state: PresenceState): void {

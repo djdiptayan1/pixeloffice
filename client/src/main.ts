@@ -37,6 +37,12 @@ import {
   type ToastPayload,
   type WelcomePayload,
   type GameUpdatePayload,
+  type FloorChangedPayload,
+  type Building,
+  type Floor,
+  type PlayerSnapshot,
+  parseBuilding,
+  floorById,
 } from "@pixeloffice/shared";
 import { Connection, serverHttpBase } from "./net/connection";
 import { createOfficeGame, type OfficeGameHandle } from "./game";
@@ -60,6 +66,7 @@ import { mountProfileCard, type ProfileCardHandle } from "./ui/profile-card";
 import { mountMinimap, type MinimapHandle } from "./ui/minimap";
 import { mountSettings, readHideNpcs, type SettingsHandle } from "./ui/settings";
 import { mountOnboarding, type OnboardingHandle } from "./ui/onboarding";
+import { createMapStudio, type MapStudioHandle } from "./ui/map-studio";
 
 const gameRoot = document.getElementById("game-root")!;
 const hudRoot = document.getElementById("hud-root")!;
@@ -113,6 +120,51 @@ let profileCard: ProfileCardHandle | null = null;
 let minimap: MinimapHandle | null = null;
 let settings: SettingsHandle | null = null;
 let onboarding: OnboardingHandle | null = null;
+// Map Studio (admin building authoring) mounts ONCE and persists across
+// reconnects (like admin/settings). It is self-contained: it fetches/saves
+// buildings through /api/maps and never touches the live game or avatars.
+let mapStudio: MapStudioHandle | null = null;
+
+// Cached active building geometry (parsed from GET /api/maps/active). Multi-floor
+// rendering needs the full Floor geometry (areas/solid/desks/portals), but
+// WELCOME/FLOOR_CHANGED only carry the lightweight floor list + the player's
+// position. We fetch the geometry once per session and look up floors locally so
+// a floor change does not block on the network. Refetched on each (re)boot.
+let activeBuilding: Building | null = null;
+let buildingFetch: Promise<Building | null> | null = null;
+
+/** Fetch + parse the active building geometry once, caching the promise so
+ *  concurrent callers (WELCOME + a quick FLOOR_CHANGED) share one request. */
+async function loadActiveBuilding(): Promise<Building | null> {
+  if (activeBuilding) return activeBuilding;
+  if (!buildingFetch) {
+    buildingFetch = (async () => {
+      try {
+        const res = await fetch(`${serverHttpBase()}/api/maps/active`);
+        if (!res.ok) return null;
+        const body = (await res.json()) as { building?: unknown };
+        if (!body?.building) return null;
+        const parsed = parseBuilding(body.building);
+        activeBuilding = parsed;
+        return parsed;
+      } catch {
+        // Map service unavailable / pre-multifloor server: fall back to the
+        // legacy single-floor rendering already booted by createOfficeGame.
+        return null;
+      } finally {
+        buildingFetch = null;
+      }
+    })();
+  }
+  return buildingFetch;
+}
+
+/** Resolve a floor's geometry by id from the cached/fetched active building. */
+async function floorGeometry(floorId: string): Promise<Floor | null> {
+  const building = await loadActiveBuilding();
+  if (!building) return null;
+  return floorById(building, floorId);
+}
 
 // Chat-focus flag for the global keys-1-4 emote handler (we must NOT fire an
 // emote while the user is typing a chat message). Updated from the HUD's
@@ -214,6 +266,11 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   // optimization). Idempotent: clears stale avatars + store before re-seeding.
   teardownSession();
 
+  // Drop any cached building geometry so this session fetches fresh — a reconnect
+  // may follow an admin map re-activation (new joins get the new active building).
+  activeBuilding = null;
+  buildingFetch = null;
+
   selfId = welcome.self.sessionId;
   const localStore = new Store(selfId);
   store = localStore;
@@ -223,6 +280,14 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   for (const p of welcome.players) localStore.upsertPlayer(p);
   for (const ev of welcome.events) localStore.upsertEvent(ev);
   if (welcome.meeting) localStore.setMeeting(welcome.meeting);
+
+  // Multi-floor: record the active building (floor picker source) + the player's
+  // authoritative current floor so the HUD floor indicator renders. Display-only
+  // — the indicator never moves the avatar (floors change by walking into an
+  // elevator). Both are optional/back-compat: a pre-multifloor WELCOME omits
+  // `building` and the indicator self-hides.
+  localStore.setBuilding(welcome.building ?? null);
+  localStore.setSelfFloor(welcome.self.floorId ?? null);
 
   // Boot the Phaser game (it owns/controls the local avatar).
   const localGame: OfficeGameHandle = await createOfficeGame({
@@ -284,6 +349,18 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
 
   // Render existing remote players into the scene.
   for (const p of welcome.players) localGame.addPlayer(p);
+
+  // Load the player's AUTHORITATIVE floor geometry. The game booted on the
+  // legacy ground floor (buildOfficeMap()); if the player's real floor differs
+  // (e.g. a reconnect landed them on floor-1) we swap to it. We also do this for
+  // the ground floor so its geometry comes from the active building (which may be
+  // an admin-authored map), keeping render + collision in sync with the server.
+  // Guarded against a stale boot: only apply while this game is still live.
+  void (async () => {
+    const floor = await floorGeometry(welcome.self.floorId ?? "ground");
+    if (!floor || game !== localGame) return;
+    localGame.setActiveFloor(floor, welcome.self, welcome.players);
+  })();
 
   // Build the HUD now that we can wire its actions to the connection + game.
   hud = createHud(hudRoot, localStore, {
@@ -380,6 +457,13 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   }
   if (!onboarding) {
     onboarding = mountOnboarding(hudRoot);
+  }
+  // Map Studio (admin building authoring) mounts once and auto-adds its own
+  // floating trigger button. Self-contained: it talks to /api/maps only and
+  // never touches the live game/avatars (changes apply to NEW joins). Persists
+  // across reconnects like admin/settings.
+  if (!mapStudio) {
+    mapStudio = createMapStudio(hudRoot);
   }
   // Re-apply persisted settings to the freshly-built game handle every boot
   // (the game is recreated on each WELCOME, so zoom/motion/NPC must be re-pushed).
@@ -505,6 +589,60 @@ function registerBridge(conn: Connection): void {
   conn.on<GameUpdatePayload>(S2C.GAME_UPDATE, ({ game }) => {
     if (!store) return;
     store.setGame(game);
+  });
+
+  // Floor change: sent ONLY to the player whose own avatar stepped onto a portal
+  // (human agency — the server never moves anyone automatically). Rebuild the
+  // floor view from the payload: swap the rendered world to the new floor, reset
+  // the roster to the destination floor's occupants, and update the floor
+  // indicator. The other floors' occupants learned of the crossing via
+  // PLAYER_LEFT (old floor) / PLAYER_JOINED (new floor).
+  conn.on<FloorChangedPayload>(S2C.FLOOR_CHANGED, (payload) => {
+    if (!game || !store) return;
+    const localGame = game;
+    const localStore = store;
+
+    // The destination self snapshot: start from the known self, override floor +
+    // position with the server's authoritative values for the new floor.
+    const prevSelf = localStore.self();
+    const self: PlayerSnapshot = {
+      ...(prevSelf ?? localStore.get().players.get(selfId)!),
+      sessionId: selfId,
+      floorId: payload.selfFloorId,
+      x: payload.x,
+      y: payload.y,
+      dir: payload.dir,
+    };
+
+    // Reset the store roster to exactly the new floor's occupants (self + others).
+    // The roster is floor-scoped server-side, so we drop everyone we knew (all on
+    // the OLD floor) and re-seed from the FLOOR_CHANGED set.
+    for (const id of [...localStore.get().players.keys()]) {
+      if (id !== selfId) localStore.removePlayer(id);
+    }
+    localStore.upsertPlayer(self);
+    for (const p of payload.players) localStore.upsertPlayer(p);
+
+    // Reset events to the destination floor's active events (events are per-floor).
+    for (const id of [...localStore.get().events.keys()]) localStore.removeEvent(id);
+    for (const ev of payload.events) localStore.upsertEvent(ev);
+
+    // Track the new floor for the HUD indicator (display-only).
+    localStore.setSelfFloor(payload.selfFloorId);
+
+    // Locate/follow chip would now point at a player on the old floor — clear it.
+    clearFollowChip();
+
+    // Swap the rendered world to the new floor's geometry. The scene tears down
+    // every avatar and rebuilds self + others; it NEVER auto-walks (the server
+    // already committed the crossing from the player's own step).
+    void (async () => {
+      const floor = await floorGeometry(payload.selfFloorId);
+      if (game !== localGame) return; // a reconnect re-booted under us
+      if (floor) {
+        localGame.setActiveFloor(floor, self, payload.players);
+      }
+    })();
   });
 }
 

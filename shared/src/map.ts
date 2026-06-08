@@ -60,7 +60,8 @@ export type FurnitureKind =
   | "whiteboard"
   | "desk-lamp"
   | "chess-table"
-  | "arcade-cabinet";
+  | "arcade-cabinet"
+  | "elevator";
 
 export interface Furniture {
   kind: FurnitureKind;

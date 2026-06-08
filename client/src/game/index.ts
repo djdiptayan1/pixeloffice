@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import Phaser from "phaser";
-import type { Direction, PlayerSnapshot, PresenceState } from "@pixeloffice/shared";
+import type { Direction, Floor, PlayerSnapshot, PresenceState } from "@pixeloffice/shared";
 import { BG_COLOR_NUM } from "./constants";
 import { OfficeScene } from "./scene";
 
@@ -36,12 +36,37 @@ export interface OfficeGameHandle {
   setNpcVisibility(visible: boolean): void;
   /** When on, skip decorative tweens (emote bounce, camera pan, dust, steam). */
   setReducedMotion(on: boolean): void;
+  /**
+   * Swap the rendered world to a different floor (multi-floor support).
+   *
+   * Call this on the network FLOOR_CHANGED message — and OPTIONALLY once right
+   * after WELCOME to load the player's authoritative floor geometry (fetched
+   * from `GET /api/maps/active`, then look up `building.floors` by `self.floorId`).
+   *
+   * It tears down the current floor's world + every avatar, rebuilds the world
+   * for `floor`, re-creates the local avatar at `self` (the server already set
+   * `self.x/y/dir` for the destination floor), adds the co-located `others`, and
+   * snaps the camera to the local avatar behind a quick fade (instant under
+   * reduced-motion). It NEVER auto-walks an avatar — the server already decided
+   * the floor change from the player's own committed step (human agency).
+   */
+  setActiveFloor(floor: Floor, self: PlayerSnapshot, others: PlayerSnapshot[]): void;
+  /** The floor id currently being rendered (for a minimap / floor readout). */
+  currentFloorId(): string;
   destroy(): void;
 }
 
 export interface CreateGameOptions {
   parent: HTMLElement;
   self: PlayerSnapshot; // the game creates and controls the local avatar itself
+  /**
+   * The geometry of the player's current floor (multi-floor support). OPTIONAL
+   * and backward-compatible: when omitted the game renders the legacy single
+   * office (`buildOfficeMap()`), which matches the default building's Ground
+   * floor — the UI bridge can then call `setActiveFloor()` once it has fetched
+   * the authoritative geometry from `GET /api/maps/active`.
+   */
+  floor?: Floor;
   onLocalMove(x: number, y: number, dir: Direction, moving: boolean): void;
   onAreaChange?(areaName: string): void; // local player entered a named area ("Hallway" when none)
   onInteractPrompt?(prompt: string | null, gameId?: string): void;
@@ -91,7 +116,7 @@ export function createOfficeGame(opts: CreateGameOptions): Promise<OfficeGameHan
     // + callbacks so init() always receives its data.
     game.events.once(Phaser.Core.Events.READY, () => {
       game.scene.add("office", scene, false);
-      game.scene.start("office", { self: opts.self, cb: callbacks });
+      game.scene.start("office", { self: opts.self, cb: callbacks, floor: opts.floor });
     });
   });
 }
@@ -136,6 +161,12 @@ function makeHandle(game: Phaser.Game, scene: OfficeScene): OfficeGameHandle {
     },
     setReducedMotion(on) {
       scene.apiSetReducedMotion(on);
+    },
+    setActiveFloor(floor, self, others) {
+      scene.apiLoadFloor(floor, self, others);
+    },
+    currentFloorId() {
+      return scene.apiCurrentFloorId();
     },
     destroy() {
       // Explicitly release the WebGL context. Phaser's WebGLRenderer.destroy()

@@ -4,34 +4,100 @@
    pointer-events-transparent overlay whose interactive children re-enable clicks.
 --------------------------------------------------------------------------- */
 
+/* ===========================================================================
+   DESIGN TOKENS
+   A single source of truth for the dark, calm, pixel-office look. The legacy
+   aliases (--panel, --accent, --shadow, …) are preserved and re-pointed at the
+   ramps below, so every existing component keeps working while new work reads
+   from the structured scales. Keep additions backward-compatible.
+=========================================================================== */
 :root {
-  --bg: #0e1116;
-  --panel: #161c24;
-  --panel-2: #1d2530;
-  --panel-3: #232d3a;
-  --border: #2a3340;
-  --border-soft: #222a35;
-  --text: #e6ecf2;
-  --muted: #9aa6b4;
-  --accent: #3ecf6e;
-  --accent-2: #2e6fd8;
-  --shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.55);
+  /* --- Neutral surface ramp (background → raised surfaces) --------------- */
+  --c-bg-0: #0a0d12;   /* deepest backdrop (behind everything) */
+  --c-bg-1: #0e1116;   /* app background                       */
+  --c-surface-1: #161c24; /* base panel                        */
+  --c-surface-2: #1d2530; /* raised / hover                    */
+  --c-surface-3: #232d3a; /* highest / active                  */
+  --c-line: #2a3340;      /* border                            */
+  --c-line-soft: #222a35; /* hairline / divider                */
 
-  /* Department chip tints — matched 1:1 to the in-game carpet tints
-     (client/src/game/constants.ts DEPARTMENT_FLOOR). */
+  /* --- Text ramp -------------------------------------------------------- */
+  --c-text: #e6ecf2;       /* primary                           */
+  --c-text-muted: #9aa6b4; /* secondary                         */
+  --c-text-faint: #6b7785; /* tertiary / disabled               */
+
+  /* --- Brand / accent ramp ---------------------------------------------- */
+  --c-accent: #3ecf6e;      /* primary action / "available"      */
+  --c-accent-bright: #4ad97d;
+  --c-accent-ink: #07200f;  /* text on accent fills              */
+  --c-info: #2e6fd8;        /* secondary / links / focus         */
+  --c-info-bright: #3d84ee;
+  --c-warn: #e8a13c;
+  --c-danger: #e5544b;
+
+  /* --- Department chip tints (1:1 with in-game carpet tints) ------------- */
   --dept-engineering: #9fb6c9; /* steel-blue */
   --dept-product: #c2a9b8;     /* mauve      */
   --dept-design: #aecaa6;      /* sage       */
   --dept-hr: #cabf9c;          /* tan        */
 
+  /* --- Radius scale ----------------------------------------------------- */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --r-pill: 999px;
+
+  /* --- Spacing scale (4px base) ----------------------------------------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* --- Elevation / shadow scale ----------------------------------------- */
+  --elev-1: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --elev-2: 0 6px 22px rgba(0, 0, 0, 0.45);
+  --elev-3: 0 18px 50px rgba(0, 0, 0, 0.55);
+  --inset-top-light: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* --- Motion timings + easing ------------------------------------------ */
+  --t-fast: 0.12s;
+  --t-base: 0.18s;
+  --t-slow: 0.3s;
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* --- Focus ring ------------------------------------------------------- */
+  --focus-ring: 0 0 0 3px rgba(46, 111, 216, 0.35);
+  --focus-color: var(--c-info);
+
+  /* --- Typography ------------------------------------------------------- */
+  --font: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+
   /* The pixel-shadow offset for the wordmark treatment. */
   --pixel-shadow: 2px 2px 0 #0a0d12, 4px 4px 0 rgba(46, 111, 216, 0.35);
 
-  --font: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  --radius: 12px;
-  --radius-sm: 8px;
-  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* ---------------------------------------------------------------------- */
+  /* LEGACY ALIASES — existing components read these. Re-pointed at the new  */
+  /* ramps so the redesign is consistent without touching every selector.   */
+  /* ---------------------------------------------------------------------- */
+  --bg: var(--c-bg-1);
+  --panel: var(--c-surface-1);
+  --panel-2: var(--c-surface-2);
+  --panel-3: var(--c-surface-3);
+  --border: var(--c-line);
+  --border-soft: var(--c-line-soft);
+  --text: var(--c-text);
+  --muted: var(--c-text-muted);
+  --accent: var(--c-accent);
+  --accent-2: var(--c-info);
+  --shadow: var(--elev-2);
+  --shadow-lg: var(--elev-3);
+  --radius: var(--r-md);
+  --radius-sm: var(--r-sm);
+  --ease: var(--ease-out);
 }
 
 * {
@@ -50,8 +116,9 @@ body {
 
 /* Consistent focus treatment everywhere — only when keyboard-navigating. */
 :focus-visible {
-  outline: 2px solid var(--accent-2);
+  outline: 2px solid var(--focus-color);
   outline-offset: 2px;
+  border-radius: var(--r-xs);
 }
 #hud-root *:focus:not(:focus-visible) {
   outline: none;
@@ -320,6 +387,175 @@ body {
   50% {
     box-shadow: 0 0 0 10px rgba(229, 84, 75, 0), var(--shadow);
   }
+}
+
+/* --------------------------- Floor indicator ---------------------------- */
+/* Display-only floor switcher (hud.ts renderFloorWidget). NOT a teleport — the
+   user changes floors by walking into an elevator (human-agency rule). The menu
+   reads like a small lift panel; the current floor is highlighted. */
+
+.hud-floor {
+  position: relative;
+}
+.hud-floor[hidden] {
+  display: none;
+}
+
+.hud-floor-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(14, 17, 22, 0.7);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 6px 11px;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: transform 0.12s var(--ease), background 0.15s ease, border-color 0.15s ease;
+}
+.hud-floor-btn:hover {
+  background: var(--panel-2);
+  border-color: color-mix(in srgb, var(--accent-2) 45%, var(--border));
+  transform: translateY(-1px);
+}
+.hud-floor-btn:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.hud-floor-icon {
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+/* Square floor badge ("G" / "1" / "2") — reads like a lift button. */
+.hud-floor-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: #07200f;
+  background: linear-gradient(180deg, #4ad97d, var(--accent));
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.hud-floor-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.hud-floor-menu {
+  position: absolute;
+  top: 118%;
+  left: 0;
+  min-width: 200px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: var(--shadow-lg);
+  z-index: 25;
+  animation: menu-pop 0.14s var(--ease) both;
+}
+.hud-floor-menu[hidden] {
+  display: none;
+}
+
+.hud-floor-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--text);
+}
+.hud-floor-item .hud-floor-badge {
+  color: var(--muted);
+  background: var(--panel-3);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.hud-floor-item.current {
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.hud-floor-item.current .hud-floor-badge {
+  color: #07200f;
+  background: linear-gradient(180deg, #4ad97d, var(--accent));
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.hud-floor-item-name {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.hud-floor-here {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.hud-floor-note {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+  padding: 8px 9px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.hud-floor-locate {
+  width: 100%;
+  margin-top: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, transform 0.1s var(--ease), border-color 0.12s ease;
+}
+.hud-floor-locate:hover {
+  background: var(--panel-3);
+  border-color: color-mix(in srgb, var(--accent-2) 45%, var(--border));
+  transform: translateY(-1px);
+}
+.hud-floor-locate:active {
+  transform: translateY(0) scale(0.98);
+}
+
+/* Per-row floor tag in the roster sub-line (cross-floor entries only). */
+.roster-floor {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent-2);
+  white-space: nowrap;
+}
+
+/* Re-enable pointer events for the floor widget's interactive children
+   (the HUD root is click-transparent by default). */
+#hud-root .hud-floor-btn,
+#hud-root .hud-floor-menu,
+#hud-root .hud-floor-locate {
+  pointer-events: auto;
 }
 
 /* ----------------------------- Sidebar ---------------------------------- */
@@ -899,6 +1135,29 @@ body {
   text-align: center;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Clean horizontal-rule divider separating the OAuth/greytHR forms from the
+   guest dev form — a centered label flanked by hairlines. */
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-2) 0;
+  color: var(--c-text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.login-divider[hidden] {
+  display: none;
+}
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
 }
 
 /* ------------------------------ Admin ----------------------------------- */

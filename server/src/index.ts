@@ -23,6 +23,7 @@ import { WebSocketTransport } from "@colyseus/ws-transport";
 import { DEFAULT_SERVER_PORT, ROOM_NAME } from "@pixeloffice/shared";
 import { OfficeRoom } from "./rooms/office.room";
 import { createAdminRouter } from "./http/admin.routes";
+import { createMapsRouter } from "./http/maps.routes";
 import { createAuthRouter } from "./http/auth.routes";
 import { createHrRouter, type SessionUser } from "./http/hr.routes";
 import { emailForName } from "./integrations/hr/mock-greythr.adapter";
@@ -92,6 +93,10 @@ async function main(): Promise<void> {
   // Admin REST (events / meetings / broadcast / users / health). The router
   // guards protected writes itself when AUTH_REQUIRED=true (open in dev).
   app.use("/api", createAdminRouter());
+
+  // Maps REST (multi-floor building list/load/save/activate for Map Studio).
+  // Reads open; writes admin-guarded (same pattern as admin routes).
+  app.use("/api/maps", createMapsRouter());
 
   // OAuth + session routes. With no providers configured the login/callback
   // routes 404 and /config reports an empty provider list (dev path unaffected).

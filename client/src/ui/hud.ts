@@ -97,6 +97,13 @@ export interface HudCallbacks {
   onLocate?(sessionId: string): void;
   onOpenProfile?(sessionId: string): void;
   isNpcHidden?(): boolean;
+  /**
+   * Optional: pan the CAMERA toward the nearest elevator/portal on the current
+   * floor (a hint affordance, NOT a teleport — human-agency rule: it must never
+   * move the player's avatar). The floor indicator's "locate elevator" button
+   * calls this. No-op / button hidden if the integrator does not wire it.
+   */
+  onLocateElevator?(): void;
 }
 
 export interface HudHandle {
@@ -142,6 +149,40 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
 
   const areaName = document.createElement("div");
   areaName.className = "hud-area";
+
+  // --- Floor indicator / switcher ------------------------------------------
+  // Display-only: shows the building's floors (from welcome.building) with the
+  // current floor highlighted (self.floorId). It is NOT a teleport — the user
+  // changes floors by walking their avatar into an elevator (human-agency rule).
+  // The optional "locate elevator" button only nudges the CAMERA. The whole
+  // widget self-hides when the server is pre-multifloor (no building / one floor).
+  const floorWidget = document.createElement("div");
+  floorWidget.className = "hud-floor";
+  floorWidget.hidden = true;
+
+  const floorButton = document.createElement("button");
+  floorButton.type = "button";
+  floorButton.className = "hud-floor-btn";
+  floorButton.setAttribute("aria-haspopup", "true");
+  floorButton.setAttribute("aria-expanded", "false");
+
+  const floorMenu = document.createElement("div");
+  floorMenu.className = "hud-floor-menu";
+  floorMenu.hidden = true;
+
+  floorButton.addEventListener("click", () => {
+    const open = floorMenu.hidden;
+    floorMenu.hidden = !open;
+    floorButton.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  const onFloorDocClick = (e: MouseEvent): void => {
+    if (!floorWidget.contains(e.target as Node)) {
+      floorMenu.hidden = true;
+      floorButton.setAttribute("aria-expanded", "false");
+    }
+  };
+  document.addEventListener("click", onFloorDocClick);
+  floorWidget.append(floorButton, floorMenu);
 
   // Status pill + dropdown
   const statusWrap = document.createElement("div");
@@ -197,7 +238,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   meetLinkAnchor.textContent = "🎥 Open Meet";
   meetLinkAnchor.hidden = true;
 
-  topBar.append(logo, areaName, statusWrap, meetingBtn, meetLinkAnchor);
+  topBar.append(logo, areaName, floorWidget, statusWrap, meetingBtn, meetLinkAnchor);
 
   // --- Right sidebar -------------------------------------------------------
   const sidebar = document.createElement("div");
@@ -364,6 +405,98 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     }
   }
 
+  /** Short floor badge ("G" for ground, else the index) for compact labels. */
+  function floorBadgeText(index: number): string {
+    return index <= 0 ? "G" : String(index);
+  }
+
+  /** Resolve a floor's display name from the building summary (or a fallback). */
+  function floorNameFor(state: UiState, floorId: string): string {
+    const f = state.building?.floors.find((fl) => fl.id === floorId);
+    if (f) return f.name;
+    if (floorId === "ground") return "Ground Floor";
+    return floorId;
+  }
+
+  function renderFloorWidget(state: UiState): void {
+    const building = state.building;
+    const currentId = store.selfFloorId();
+    const floors = building?.floors ? [...building.floors].sort((a, b) => a.index - b.index) : [];
+
+    // Hide the whole widget on a single-floor / pre-multifloor server — there is
+    // nothing meaningful to show or switch between.
+    if (floors.length <= 1) {
+      floorWidget.hidden = true;
+      floorMenu.hidden = true;
+      return;
+    }
+    floorWidget.hidden = false;
+
+    const current = floors.find((f) => f.id === currentId);
+    const currentIndex = current?.index ?? 0;
+
+    floorButton.innerHTML = "";
+    const icon = document.createElement("span");
+    icon.className = "hud-floor-icon";
+    icon.textContent = "🏢";
+    const badge = document.createElement("span");
+    badge.className = "hud-floor-badge";
+    badge.textContent = floorBadgeText(currentIndex);
+    const label = document.createElement("span");
+    label.className = "hud-floor-label";
+    label.textContent = current?.name ?? floorNameFor(state, currentId);
+    const caret = document.createElement("span");
+    caret.className = "hud-caret";
+    caret.textContent = "▾";
+    floorButton.append(icon, badge, label, caret);
+    floorButton.setAttribute(
+      "aria-label",
+      `Current floor: ${current?.name ?? currentId}. Walk into an elevator to change floors.`,
+    );
+
+    // The menu lists every floor (top floor first so it reads like a lift panel),
+    // marking the current one. Rows are DISPLAY ONLY — they never move the avatar.
+    floorMenu.innerHTML = "";
+    for (const f of [...floors].reverse()) {
+      const row = document.createElement("div");
+      row.className = "hud-floor-item";
+      if (f.id === currentId) row.classList.add("current");
+      const fb = document.createElement("span");
+      fb.className = "hud-floor-badge";
+      fb.textContent = floorBadgeText(f.index);
+      const fn = document.createElement("span");
+      fn.className = "hud-floor-item-name";
+      fn.textContent = f.name;
+      row.append(fb, fn);
+      if (f.id === currentId) {
+        const here = document.createElement("span");
+        here.className = "hud-floor-here";
+        here.textContent = "You are here";
+        row.appendChild(here);
+      }
+      floorMenu.appendChild(row);
+    }
+
+    const note = document.createElement("div");
+    note.className = "hud-floor-note";
+    note.textContent = "Walk into an elevator to change floors.";
+    floorMenu.appendChild(note);
+
+    // Optional camera-only "locate elevator" affordance (never moves the avatar).
+    if (cb.onLocateElevator) {
+      const locateBtn = document.createElement("button");
+      locateBtn.type = "button";
+      locateBtn.className = "hud-floor-locate";
+      locateBtn.textContent = "🧭 Find the elevator";
+      locateBtn.addEventListener("click", () => {
+        floorMenu.hidden = true;
+        floorButton.setAttribute("aria-expanded", "false");
+        cb.onLocateElevator?.();
+      });
+      floorMenu.appendChild(locateBtn);
+    }
+  }
+
   function renderRoster(state: UiState): void {
     rosterBody.innerHTML = "";
     const hideNpcs = cb.isNpcHidden?.() ?? false;
@@ -426,6 +559,22 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
         area.className = "roster-area";
         area.textContent = areaNameFor(p);
         sub.append(chip, area);
+        // Per-row floor label — shown only in a multifloor building, and only
+        // when the player is on a DIFFERENT floor than the viewer (the server
+        // floor-scopes the roster, so usually everyone shares one floor; this is
+        // a robust readout for any cross-floor entries). Display-only.
+        const pFloor = p.floorId ?? "ground";
+        const selfFloor = store.selfFloorId();
+        const floorCount = state.building?.floors.length ?? 0;
+        if (floorCount > 1 && pFloor !== selfFloor) {
+          const floorTag = document.createElement("span");
+          floorTag.className = "roster-floor";
+          const idx =
+            state.building?.floors.find((f) => f.id === pFloor)?.index ?? 0;
+          floorTag.textContent = `· ${floorBadgeText(idx)}`;
+          floorTag.title = floorNameFor(state, pFloor);
+          sub.append(floorTag);
+        }
         info.append(nameEl, sub);
         // ⓘ affordance opens the profile card (distinct from row-click = locate).
         const infoBtn = document.createElement("button");
@@ -535,6 +684,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     const state = store.get();
     const self = store.self();
     areaName.textContent = state.selfArea || "Hallway";
+    renderFloorWidget(state);
     renderStatusPill(self);
     renderMeeting(state);
     renderMeetingDetails(state.myMeeting);
@@ -573,6 +723,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     destroy(): void {
       window.clearInterval(timerId);
       document.removeEventListener("click", onDocClick);
+      document.removeEventListener("click", onFloorDocClick);
       if (gameOverlay) {
         gameOverlay.destroy();
         gameOverlay = null;

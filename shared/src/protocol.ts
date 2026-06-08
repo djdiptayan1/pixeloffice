@@ -94,6 +94,14 @@ export const S2C = {
   EVENT_CREATED: "event-created",
   EVENT_UPDATED: "event-updated",
   EVENT_ENDED: "event-ended",
+  /**
+   * Sent ONLY to a player after THEIR OWN avatar stepped onto a portal tile and
+   * the server moved them to another floor (human agency: never automatic). It
+   * carries the new floor id + the full set of players already on that floor so
+   * the client can re-render the world. PLAYER_JOINED/LEFT inform the two
+   * floors' other occupants of the crossing.
+   */
+  FLOOR_CHANGED: "floor-changed",
   MEETING_STARTED: "meeting-started",
   MEETING_ENDED: "meeting-ended",
   TOAST: "toast",
@@ -102,14 +110,58 @@ export const S2C = {
   PLAYER_UPDATED: "player-updated",
 } as const;
 
+/** A floor's identity as advertised to the client (no geometry — fetched via /api/maps). */
+export interface FloorSummary {
+  id: string;
+  name: string;
+  index: number;
+}
+
+/** The active building, summarized for the client (floor list, ordered by index). */
+export interface BuildingSummary {
+  id: string;
+  name: string;
+  floors: FloorSummary[];
+}
+
 export interface WelcomePayload {
   self: PlayerSnapshot;
-  /** All OTHER players currently in the office (self excluded). */
+  /**
+   * All OTHER players currently ON THE SELF PLAYER'S FLOOR (self excluded).
+   * Floor-scoped: the client only ever knows about co-located players. When a
+   * player changes floors a FLOOR_CHANGED message replaces this set.
+   */
   players: PlayerSnapshot[];
-  /** Currently active social events. */
+  /** Currently active social events (scoped to the self player's floor). */
   events: SocialEvent[];
   /** The local user's current meeting, if one is already in progress. */
   meeting: MeetingInfo | null;
+  /**
+   * The active building summary (floor list). OPTIONAL/backward-compatible: a
+   * pre-multifloor client ignores it; a multifloor client renders the floor
+   * picker from it. The current floor is `self.floorId`; full floor geometry is
+   * fetched from `GET /api/maps/active`.
+   */
+  building?: BuildingSummary;
+}
+
+/**
+ * Sent to a player after their OWN movement carried them through a portal. The
+ * client tears down its current floor view and rebuilds from this payload. Other
+ * players learn of the crossing via PLAYER_LEFT (old floor) + PLAYER_JOINED
+ * (new floor). Human agency: only ever follows the player's own committed step.
+ */
+export interface FloorChangedPayload {
+  /** The player's new floor id (matches self.floorId going forward). */
+  selfFloorId: string;
+  /** The player's new tile position on the destination floor. */
+  x: number;
+  y: number;
+  dir: Direction;
+  /** All OTHER players currently on the destination floor (self excluded). */
+  players: PlayerSnapshot[];
+  /** Active social events on the destination floor. */
+  events: SocialEvent[];
 }
 
 export interface PlayerJoinedPayload {

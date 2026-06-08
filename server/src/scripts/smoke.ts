@@ -24,6 +24,9 @@ import {
   type PresencePayload,
   type SetStatusPayload,
   type WelcomePayload,
+  type FloorChangedPayload,
+  type BuildingJSON,
+  type FloorJSON,
 } from "@pixeloffice/shared";
 
 const ENDPOINT = `ws://localhost:${DEFAULT_SERVER_PORT}`;
@@ -256,8 +259,120 @@ async function main(): Promise<void> {
     fail("MEETING_STARTED received after POST /api/meetings", (e as Error).message);
   }
 
+  // 8. MULTI-FLOOR: a fresh client walks onto the ground elevator portal and
+  //    must receive FLOOR_CHANGED for floor-1 (human agency: own movement only).
+  try {
+    const resp = await fetch(`${HTTP}/api/maps/active`);
+    const { building } = (await resp.json()) as { building: BuildingJSON };
+    const ground = building.floors.find((f) => f.index === 0)!;
+    const portal = ground.portals[0];
+
+    const clientC = new Client(ENDPOINT);
+    const optsC: JoinOptions = { name: "Lift", department: "HR", avatarId: "violet" };
+    const roomC: Room = await clientC.joinOrCreate(ROOM_NAME, optsC);
+    const welcomesC = collector<WelcomePayload>(roomC, S2C.WELCOME);
+    const floorChangesC = collector<FloorChangedPayload>(roomC, S2C.FLOOR_CHANGED);
+    const teleportsC = collector<PlayerTeleportedPayload>(roomC, S2C.PLAYER_TELEPORTED);
+    const welcomeC = await waitFor("WELCOME (C)", () => welcomesC[0]);
+
+    // WELCOME must advertise the building (floor list) + the player's floor.
+    if (welcomeC.building && welcomeC.building.floors.length >= 3 && welcomeC.self.floorId === ground.id) {
+      pass(`WELCOME carries building summary (${welcomeC.building.floors.length} floors) + self.floorId`);
+    } else {
+      fail("WELCOME carries building summary + self.floorId", JSON.stringify(welcomeC.building));
+    }
+
+    // BFS a path from spawn to the portal tile, then step it one tile per MOVE.
+    const path = bfsPath(ground, { x: welcomeC.self.x, y: welcomeC.self.y }, { x: portal.x, y: portal.y });
+    if (!path) {
+      fail("BFS path to ground elevator portal");
+    } else {
+      let prevDir: Direction = welcomeC.self.dir;
+      for (const step of path) {
+        roomC.send(C2S.MOVE, step);
+        prevDir = step.dir;
+        // Pace within the 20 steps/sec move budget.
+        await sleep(60);
+      }
+      void prevDir;
+      const fc = await waitFor(
+        "FLOOR_CHANGED to floor-1",
+        () => floorChangesC.find((m) => m.selfFloorId !== ground.id),
+        7000,
+      );
+      if (fc.selfFloorId === portal.toFloorId) {
+        pass(`FLOOR_CHANGED to ${fc.selfFloorId} after stepping onto the elevator`);
+      } else {
+        fail("FLOOR_CHANGED to the portal target floor", JSON.stringify(fc));
+      }
+      // The mover should NOT have been teleported by anything other than their
+      // own portal step (no auto-teleport on the old floor).
+      void teleportsC;
+    }
+
+    await roomC.leave();
+  } catch (e) {
+    fail("multi-floor elevator floor change", (e as Error).message);
+  }
+
   await roomA.leave();
   await roomB.leave();
+}
+
+/** Sleep helper for pacing MOVE sends within the rate budget. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Breadth-first shortest walkable path from `start` to `goal` on a FloorJSON,
+ * returned as a list of MovePayload steps (excluding the start tile). null when
+ * unreachable. Uses the floor's solid grid as the collision authority.
+ */
+function bfsPath(
+  floor: FloorJSON,
+  start: { x: number; y: number },
+  goal: { x: number; y: number },
+): MovePayload[] | null {
+  const key = (x: number, y: number) => `${x},${y}`;
+  const walkable = (x: number, y: number) =>
+    x >= 0 && y >= 0 && x < floor.width && y < floor.height && floor.solid[y][x] !== true;
+  const prev = new Map<string, { x: number; y: number; dir: Direction } | null>();
+  prev.set(key(start.x, start.y), null);
+  const queue: Array<{ x: number; y: number }> = [start];
+  const steps: Array<{ dx: number; dy: number; dir: Direction }> = [
+    { dx: 0, dy: -1, dir: "up" },
+    { dx: 0, dy: 1, dir: "down" },
+    { dx: -1, dy: 0, dir: "left" },
+    { dx: 1, dy: 0, dir: "right" },
+  ];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (cur.x === goal.x && cur.y === goal.y) break;
+    for (const s of steps) {
+      const nx = cur.x + s.dx;
+      const ny = cur.y + s.dy;
+      if (!walkable(nx, ny)) continue;
+      const k = key(nx, ny);
+      if (prev.has(k)) continue;
+      prev.set(k, { x: cur.x, y: cur.y, dir: s.dir });
+      queue.push({ x: nx, y: ny });
+    }
+  }
+  if (!prev.has(key(goal.x, goal.y))) return null;
+  // Reconstruct.
+  const out: MovePayload[] = [];
+  let curK = key(goal.x, goal.y);
+  let cur = goal;
+  while (true) {
+    const p = prev.get(curK);
+    if (!p) break;
+    out.push({ x: cur.x, y: cur.y, dir: p.dir, moving: true });
+    cur = { x: p.x, y: p.y };
+    curK = key(p.x, p.y);
+  }
+  out.reverse();
+  return out;
 }
 
 /** Pick a walkable adjacent tile, preferring `preferDir` if walkable. */
