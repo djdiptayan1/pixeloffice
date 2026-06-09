@@ -14,6 +14,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
@@ -25,6 +26,14 @@ const execFileAsync = promisify(execFile);
 const SERVER = (process.env.FLOOR_SYNC_SERVER || "http://localhost:2567").replace(/\/+$/, "");
 const INTERVAL = clampInterval(parseInt(process.env.FLOOR_SYNC_INTERVAL || "", 10), 20000);
 const SECRET = process.env.FLOOR_SYNC_SECRET || "";
+// TLS for HTTPS office servers with a self-signed / internal-CA cert (the common
+// LAN deployment, e.g. https://10.x:8443). Pick ONE:
+//   FLOOR_SYNC_CA=/path/to/ca.pem  -> trust that CA (secure, recommended).
+//   FLOOR_SYNC_INSECURE=true       -> skip cert verification (only for your own
+//                                     trusted office server on the LAN).
+const INSECURE = ["true", "1", "yes"].includes((process.env.FLOOR_SYNC_INSECURE || "").toLowerCase());
+const CA_PATH = (process.env.FLOOR_SYNC_CA || "").trim();
+const CA = CA_PATH ? (() => { try { return readFileSync(CA_PATH); } catch (e) { console.warn("! could not read FLOOR_SYNC_CA:", String(e)); return undefined; } })() : undefined;
 // PAIRING CODE: shown in PixelOffice Settings after you enable "Sync my floor".
 // When set, it is sent as body.pairCode so the server ties this report to YOUR
 // exact session regardless of IP (works behind NAT, a VPN, Docker, or with
@@ -136,6 +145,11 @@ function postReport(ssid) {
           "Content-Length": Buffer.byteLength(body),
         },
         timeout: 8000,
+        // HTTPS only: trust an internal CA, or skip verification when explicitly
+        // opted in (self-signed office server on the LAN). Ignored over plain http.
+        ...(url.protocol === "https:"
+          ? { rejectUnauthorized: !INSECURE, ...(CA ? { ca: CA } : {}) }
+          : {}),
       },
       (res) => {
         let data = "";
@@ -211,6 +225,9 @@ function startupHelp() {
   console.log(`  interval : ${INTERVAL} ms`);
   console.log(`  secret   : ${SECRET ? "set" : "(none)"}`);
   console.log(`  pairCode : ${PAIR_CODE ? `set (${PAIR_CODE}) — ties reports to your session, any IP` : "(none) — falls back to matching by your machine's IP"}`);
+  if (ENDPOINT.startsWith("https:")) {
+    console.log(`  tls      : ${CA ? "trusting FLOOR_SYNC_CA" : INSECURE ? "INSECURE (cert verification OFF)" : "verifying cert (set FLOOR_SYNC_INSECURE=true for a self-signed office server, or FLOOR_SYNC_CA=/path/ca.pem)"}`);
+  }
   if (FAKE_SSID) console.log(`  FAKE SSID: ${FAKE_SSID} (testing override; OS WiFi not read)`);
   console.log("  privacy  : reads only the WiFi name; nothing is stored. Enable");
   console.log('             "Sync my floor" in PixelOffice Settings for it to take effect.');
