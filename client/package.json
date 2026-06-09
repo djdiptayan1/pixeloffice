@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:poll": "CHOKIDAR_USEPOLLING=true vite",
     "build": "vite build",
     "preview": "vite preview --port 5173 --host"
   },
