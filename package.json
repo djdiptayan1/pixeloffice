@@ -16,7 +16,8 @@
     "build": "npm run build -w client",
     "smoke": "npm run smoke -w server",
     "google-stub": "npm run google-stub -w server",
-    "smoke:calendar": "npm run smoke:calendar -w server"
+    "smoke:calendar": "npm run smoke:calendar -w server",
+    "companion": "node companion/floor-sync.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
