@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# PixelOffice — one-click local launcher (Docker).
+# PixelOffice — LAN HTTPS DEV launcher (Caddy + npm dev, no Docker).
 #
-#   ./start-office.sh           build the image + (re)start the office, open it
-#   ./start-office.sh stop      stop & remove the running office container
-#   ./start-office.sh logs      follow the office logs
-#   ./start-office.sh --full    full stack (app + Postgres + Redis) via compose
-#   ./start-office.sh restart   stop then start again
+#   ./start-office.sh           start npm dev + Caddy HTTPS for the LAN
+#   PORT443=1 ./start-office.sh use https://<lan-ip> on :443 (sudo Caddy)
 #
-# The default runs the self-contained single container (in-memory, zero-config):
-# the server + the built client are served together on http://localhost:2567.
-# Drop an .env file next to this script to configure anything (OFFICE_SUBNETS,
-# SSID_FLOOR_MAP, FLOOR_SYNC_SECRET, GOOGLE_CLIENT_ID, AUTH_REQUIRED, ...);
-# it is passed straight into the container when present.
+# This intentionally runs the zero-config development stack:
+#   - server dev on :2567
+#   - Vite client dev on :5173
+#   - Caddy HTTPS proxy on https://<lan-ip>:8443 (or :443 with PORT443=1)
+#
+# It does NOT build production assets and does NOT start Docker. Press Ctrl-C
+# in this terminal to stop both npm dev and Caddy.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-IMAGE="pixeloffice:latest"
-NAME="pixeloffice"
-PORT="2567"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
+
+SERVER_PORT="${SERVER_PORT:-2567}"
+CLIENT_PORT="${CLIENT_PORT:-5173}"
+HTTPS_PORT="${HTTPS_PORT:-8443}"
 
 c_green=$'\033[32m'; c_blue=$'\033[34m'; c_yellow=$'\033[33m'; c_red=$'\033[31m'; c_reset=$'\033[0m'
 say()  { printf '%s\n' "${c_blue}▸ $*${c_reset}"; }
@@ -28,86 +28,155 @@ ok()   { printf '%s\n' "${c_green}✓ $*${c_reset}"; }
 warn() { printf '%s\n' "${c_yellow}! $*${c_reset}"; }
 die()  { printf '%s\n' "${c_red}✗ $*${c_reset}" >&2; exit 1; }
 
-command -v docker >/dev/null 2>&1 || die "Docker is not installed or not on PATH."
-docker info >/dev/null 2>&1 || die "Docker daemon is not running. Start Docker and retry."
+if [[ "${1:-start}" != "start" ]]; then
+  cat >&2 <<'EOF'
+start-office.sh now runs the LAN dev stack in the foreground.
 
-# LAN IP so teammates / other floors can connect from their own machines.
-lan_ip() { hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -1; }
+Usage:
+  ./start-office.sh              # https://<lan-ip>:8443
+  PORT443=1 ./start-office.sh    # https://<lan-ip> (Caddy uses sudo)
 
-open_browser() {
-  local url="$1"
-  ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 ) \
-    || ( command -v open  >/dev/null 2>&1 && open "$url" >/dev/null 2>&1 ) \
+Stop it with Ctrl-C in the terminal where it is running.
+EOF
+  exit 1
+fi
+
+command -v npm >/dev/null 2>&1 || die "npm is not installed or not on PATH."
+command -v curl >/dev/null 2>&1 || die "curl is not installed or not on PATH."
+
+if ! command -v caddy >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+[start-office] Caddy is not installed — LAN HTTPS needs it.
+
+Install it:
+  macOS:   brew install caddy
+  Linux:   https://caddyserver.com/docs/install
+
+The zero-config local dev path still works without Caddy:
+  npm run dev
+EOF
+  exit 1
+fi
+
+lan_ip() {
+  ipconfig getifaddr en0 2>/dev/null \
+    || hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -1 \
+    || ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | head -1 \
     || true
 }
 
-wait_healthy() {
-  say "Waiting for the office to come up…"
+open_browser() {
+  local url="$1"
+  ( command -v open >/dev/null 2>&1 && open "$url" >/dev/null 2>&1 ) \
+    || ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 ) \
+    || true
+}
+
+wait_for() {
+  local name="$1" url="$2"
+  say "Waiting for ${name}…"
   for _ in $(seq 1 60); do
-    if curl -fs -m 2 "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then return 0; fi
+    if curl -fks -m 2 "$url" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   return 1
 }
 
-cmd="${1:-start}"
+LAN_IP="${PIXELOFFICE_LAN_IP:-$(lan_ip)}"
+LAN_IP="${LAN_IP:-127.0.0.1}"
 
-case "$cmd" in
-  stop)
-    say "Stopping the office…"
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
-    docker compose --profile app down >/dev/null 2>&1 || true
-    ok "Stopped."
-    exit 0
-    ;;
+if [[ "${PORT443:-0}" == "1" ]]; then
+  HOST="${PIXELOFFICE_HOST:-${LAN_IP}}"
+  PUBLIC_URL="https://${HOST}"
+  CADDY_BIN=(sudo caddy run)
+else
+  HOST="${PIXELOFFICE_HOST:-${LAN_IP}:${HTTPS_PORT}}"
+  PUBLIC_URL="https://${HOST}"
+  CADDY_BIN=(caddy run)
+fi
 
-  logs)
-    exec docker logs -f "$NAME"
-    ;;
+# Make OAuth callbacks land on the HTTPS LAN URL when OAuth env is configured,
+# while preserving any explicit values from the user's shell/.env.
+export CLIENT_APP_URL="${CLIENT_APP_URL:-${PUBLIC_URL}}"
+export OAUTH_REDIRECT_BASE="${OAUTH_REDIRECT_BASE:-${PUBLIC_URL}}"
 
-  --full|full)
-    say "Starting FULL stack (app + Postgres + Redis) via docker compose…"
-    docker rm -f "$NAME" >/dev/null 2>&1 || true   # avoid port clash with the single container
-    docker compose --profile app up --build -d
-    wait_healthy && ok "Full stack up." || die "Health check timed out — see: docker compose --profile app logs"
-    ;;
+port_in_use() {
+  local port="$1"
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof -tiTCP:"${port}" -sTCP:LISTEN -n -P >/dev/null 2>&1
+}
 
-  restart)
-    "$0" stop || true
-    exec "$0" start
-    ;;
+for port in "$SERVER_PORT" "$CLIENT_PORT"; do
+  if port_in_use "$port"; then
+    die "Port ${port} is already in use. Stop the old process first (if it is the old Docker launcher: docker rm -f pixeloffice)."
+  fi
+done
+if [[ "${PORT443:-0}" != "1" ]] && port_in_use "$HTTPS_PORT"; then
+  die "Port ${HTTPS_PORT} is already in use. Set HTTPS_PORT=<free-port> or stop the process using it."
+fi
 
-  start)
-    say "Building the PixelOffice image (first run takes a minute)…"
-    docker build -t "$IMAGE" . || die "Image build failed."
-    say "(Re)starting the office container…"
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
-    # If our canonical port is busy (e.g. a dev/verification server is running),
-    # walk up to the next free host port instead of failing.
-    while ss -tln 2>/dev/null | grep -q ":${PORT} "; do
-      warn "Port ${PORT} is busy — trying $((PORT+1))…"
-      PORT=$((PORT+1))
-    done
-    envfile_arg=()
-    if [[ -f "$HERE/.env" ]]; then envfile_arg=(--env-file "$HERE/.env"); warn "Using .env"; fi
-    # Map the chosen host port -> the container's internal 2567. The client is
-    # served same-origin, so the browser connects back on the same host port.
-    docker run -d --name "$NAME" --restart unless-stopped \
-      -p "${PORT}:2567" "${envfile_arg[@]}" "$IMAGE" >/dev/null
-    wait_healthy || die "Health check timed out — see: ./start-office.sh logs"
-    ;;
+CADDY_DEV_CONFIG="$(mktemp -t pixeloffice-caddy-dev.XXXXXX)"
+cat >"$CADDY_DEV_CONFIG" <<EOF
+# Generated by ./start-office.sh — dev-only LAN HTTPS proxy.
+# Vite serves the client on :${CLIENT_PORT}; the PixelOffice server handles
+# /api, Colyseus matchmake HTTP, and Colyseus room WebSockets on :${SERVER_PORT}.
+https://${HOST} {
+	tls internal
 
-  *)
-    die "Unknown command '$cmd'. Use: start | stop | logs | restart | --full"
-    ;;
-esac
+	@api path /api/*
+	reverse_proxy @api 127.0.0.1:${SERVER_PORT}
 
-ip="$(lan_ip || true)"
+	@matchmake path /matchmake/*
+	reverse_proxy @matchmake 127.0.0.1:${SERVER_PORT}
+
+	@colyseus_ws {
+		header Connection *Upgrade*
+		header Upgrade websocket
+		path_regexp colyseus ^/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$
+	}
+	reverse_proxy @colyseus_ws 127.0.0.1:${SERVER_PORT}
+
+	reverse_proxy 127.0.0.1:${CLIENT_PORT}
+}
+EOF
+
+DEV_PID=""
+CADDY_PID=""
+cleanup() {
+  local code=$?
+  [[ -n "$CADDY_PID" ]] && kill "$CADDY_PID" >/dev/null 2>&1 || true
+  [[ -n "$DEV_PID" ]] && kill "$DEV_PID" >/dev/null 2>&1 || true
+  rm -f "$CADDY_DEV_CONFIG"
+  exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+say "Starting PixelOffice dev stack with npm (no Docker, no production build)…"
+npm run dev &
+DEV_PID=$!
+
+wait_for "server http://localhost:${SERVER_PORT}" "http://localhost:${SERVER_PORT}/api/health" \
+  || die "Server did not become healthy on :${SERVER_PORT}. If an old Docker container is using the port, stop it first."
+wait_for "Vite client http://localhost:${CLIENT_PORT}" "http://localhost:${CLIENT_PORT}" \
+  || die "Vite client did not become reachable on :${CLIENT_PORT}."
+
+say "Starting Caddy HTTPS proxy for the LAN…"
+"${CADDY_BIN[@]}" --config "$CADDY_DEV_CONFIG" --adapter caddyfile &
+CADDY_PID=$!
+
+# Caddy's internal CA uses a local certificate; -k is only for this readiness probe.
+wait_for "Caddy ${PUBLIC_URL}" "${PUBLIC_URL}" \
+  || die "Caddy did not become reachable at ${PUBLIC_URL}."
+
 echo
-ok "PixelOffice is running 🏢"
-echo "   • This machine:  http://localhost:${PORT}"
-[[ -n "$ip" ]] && echo "   • Same network:  http://${ip}:${PORT}   (share with teammates / other floors)"
-echo "   • Stop:          ./start-office.sh stop"
-echo "   • Logs:          ./start-office.sh logs"
+ok "PixelOffice dev office is running 🏢"
+echo "   • Local Vite:    http://localhost:${CLIENT_PORT}"
+echo "   • Local server:  http://localhost:${SERVER_PORT}"
+echo "   • LAN HTTPS:     ${PUBLIC_URL}   (share this)"
+echo "   • Stop:          Ctrl-C in this terminal"
 echo
-open_browser "http://localhost:${PORT}"
+warn "First LAN visit may show Caddy's internal-CA warning; click through or run: caddy trust"
+echo
+open_browser "${PUBLIC_URL}"
+
+wait "$CADDY_PID"
