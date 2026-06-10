@@ -165,8 +165,10 @@ describe("buildDefaultBuilding seed", () => {
     // floor A onto floor B lands NEAR the elevator that takes them back to A, but
     // NEVER one step from re-riding ANY elevator. Previously the rider dropped on
     // the tile directly below the return portal — which, where two elevators sit
-    // one row apart (Floor 1: down @ (23,27), up @ (25,27)), is one step from BOTH,
-    // so the first forward step yo-yos them back. The fix lands them >= 2 tiles
+    // close together, is one step from BOTH, so the first forward step yo-yos them
+    // back. (Floor 1's down/up elevators are now spaced 6 tiles apart — down @
+    // (21,27), up @ (27,27) — so neither shares the other's approach path.) The fix
+    // also lands every rider >= 2 tiles
     // (Manhattan) from EVERY portal so a single casual step can never re-trigger a
     // crossing, while staying in the same lift lobby (a few tiles of the return
     // portal). Never cross-map, never on a portal tile itself.
@@ -188,6 +190,23 @@ describe("buildDefaultBuilding seed", () => {
         // Same lift lobby: the landing stays close to the return portal.
         const distBack = Math.abs(back!.x - p.toX) + Math.abs(back!.y - p.toY);
         expect(distBack).toBeLessThanOrEqual(4);
+      }
+    }
+  });
+
+  it("two elevators on the same floor are spaced far apart (no accidental ride)", () => {
+    // Regression (explorer finding): Floor 1's down/up elevators used to sit one
+    // walkable tile apart (23,27)/(25,27), so walking toward one routed through
+    // the other and silently rode it. Any two portals on the same floor must be
+    // far enough that approaching one never steps onto the other.
+    for (const floor of building.floors) {
+      for (let i = 0; i < floor.portals.length; i++) {
+        for (let j = i + 1; j < floor.portals.length; j++) {
+          const a = floor.portals[i];
+          const b = floor.portals[j];
+          const d = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+          expect(d).toBeGreaterThanOrEqual(4);
+        }
       }
     }
   });

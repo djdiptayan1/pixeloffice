@@ -356,6 +356,7 @@ function buildGroundFloor(): Floor {
   furniture.push({ kind: "plant", x: 18, y: 29, w: 1, h: 1, solid: true });
   furniture.push({ kind: "plant", x: 45, y: 29, w: 1, h: 1, solid: true });
   furniture.push({ kind: "door-mat", x: 23, y: 32, w: 2, h: 1, solid: false });
+  furniture.push({ kind: "rug", x: 22, y: 30, w: 4, h: 2, solid: false });
   furniture.push({ kind: "sofa", x: 20, y: 29, w: 3, h: 1, solid: true });
   anchors["Reception"] = [
     { x: 22, y: 31 },
@@ -366,10 +367,58 @@ function buildGroundFloor(): Floor {
     { x: 32, y: 31 },
   ];
 
+  // --- Lobby lounge (left side) -------------------------------------------
+  // A welcoming waiting area so the Ground floor reads as a real lobby (not a
+  // placeholder) — sofas + beanbags around a coffee table on a rug, framed by
+  // plants. All standing/seating anchors are walkable (used only after an
+  // explicit Join — human agency).
+  const lounge: Area = { name: "Lobby Lounge", type: "COFFEE", x: 3, y: 7, w: 12, h: 9 };
+  areas.push(lounge);
+  furniture.push({ kind: "rug", x: 5, y: 9, w: 6, h: 5, solid: false });
+  furniture.push({ kind: "sofa", x: 5, y: 9, w: 3, h: 1, solid: true });
+  furniture.push({ kind: "sofa", x: 9, y: 9, w: 2, h: 1, solid: true });
+  furniture.push({ kind: "table", x: 7, y: 11, w: 2, h: 1, solid: true });
+  furniture.push({ kind: "beanbag", x: 5, y: 13, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "beanbag", x: 10, y: 13, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 3, y: 7, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 14, y: 7, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "bookshelf", x: 3, y: 15, w: 2, h: 1, solid: true });
+  anchors["Lobby Lounge"] = [
+    { x: 6, y: 12 },
+    { x: 7, y: 12 },
+    { x: 8, y: 12 },
+    { x: 9, y: 12 },
+    { x: 6, y: 10 },
+    { x: 9, y: 10 },
+  ];
+
+  // --- Notice / refreshments wall (right side) ----------------------------
+  // A notice board with a water cooler + vending machine so the lobby has
+  // something to walk over to and read/use, balancing the lounge on the left.
+  const notices: Area = { name: "Notice Board", type: "COFFEE", x: 33, y: 7, w: 12, h: 9 };
+  areas.push(notices);
+  furniture.push({ kind: "whiteboard", x: 37, y: 8, w: 4, h: 1, solid: true });
+  furniture.push({ kind: "water-cooler", x: 34, y: 9, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "vending-machine", x: 43, y: 9, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 33, y: 15, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 44, y: 15, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "chess-table", x: 38, y: 13, w: 1, h: 1, solid: true });
+  anchors["Notice Board"] = [
+    { x: 37, y: 10 },
+    { x: 38, y: 10 },
+    { x: 39, y: 10 },
+    { x: 40, y: 10 },
+    { x: 37, y: 13 },
+    { x: 39, y: 13 },
+  ];
+
   // A single elevator near the center of the lobby, going UP to floor-1.
   const elevX = 24;
   const elevY = 18;
   furniture.push({ kind: "elevator", x: elevX, y: elevY, w: 1, h: 1, solid: false });
+  // A rug under the elevator landing to mark the lift lobby.
+  furniture.push({ kind: "plant", x: 22, y: 16, w: 1, h: 1, solid: true });
+  furniture.push({ kind: "plant", x: 26, y: 16, w: 1, h: 1, solid: true });
   const portals: Portal[] = [
     {
       x: elevX,
@@ -555,9 +604,14 @@ function buildUpperFloor(spec: UpperFloorSpec): Floor {
     { x: 27, y: 3 },
   ];
 
-  // --- Elevator (center-bottom open floor) --------------------------------
-  // Two portal tiles share a small lobby so "up" and "down" do not overlap.
-  const elevDownX = 23;
+  // --- Elevators (center-bottom open floor) -------------------------------
+  // The DOWN and UP elevators are deliberately spaced FAR apart (6 tiles) on the
+  // same open landing row so a player heading for one can never accidentally
+  // step onto the other. Previously they sat 2 tiles apart (23,27)/(25,27) with
+  // a single walkable tile between them — walking toward the far one routed
+  // through/adjacent to the near one and silently rode it. With a wide gap and
+  // open walkable tiles between, the two portals never share an approach path.
+  const elevDownX = 21;
   const elevY = 27;
   furniture.push({ kind: "elevator", x: elevDownX, y: elevY, w: 1, h: 1, solid: false });
 
@@ -574,7 +628,7 @@ function buildUpperFloor(spec: UpperFloorSpec): Floor {
   ];
 
   if (spec.upToFloorId) {
-    const elevUpX = 25;
+    const elevUpX = 27;
     furniture.push({ kind: "elevator", x: elevUpX, y: elevY, w: 1, h: 1, solid: false });
     portals.push({
       x: elevUpX,

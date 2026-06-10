@@ -1128,19 +1128,37 @@ export class OfficeRoom extends Room {
     // falling back to the MAIN OFFICE floor — which owns the named meeting rooms
     // — if the player's floor lacks the room).
     const snap = this.players.get(client.sessionId);
-    const floorId = snap?.floorId ?? this.spawnFloorId;
-    let map = this.floors.get(floorId) ?? this.floors.get(this.mainOfficeFloorId)!;
+    if (!snap) return;
+    const currentFloorId = snap.floorId ?? this.spawnFloorId;
+    // Resolve the floor that actually OWNS the named meeting room. Prefer the
+    // player's current floor (so a meeting in a room that exists on this floor
+    // seats them here), then the room's first owning floor, then the main office.
+    let map = this.floors.get(currentFloorId) ?? this.floors.get(this.mainOfficeFloorId)!;
     if (!map.anchors[meeting.roomName]) {
-      map = this.floors.get(this.mainOfficeFloorId)!;
+      const owner = this.building.floors.find((f) => f.anchors[meeting.roomName]);
+      map = owner ?? this.floors.get(this.mainOfficeFloorId)!;
     }
     const seatIndex = this.meetingSlots.assign(meeting.id, client.sessionId);
     const anchor = anchorFor(map, meeting.roomName, seatIndex);
+
+    // If the meeting room lives on a DIFFERENT floor than the player, take the
+    // joiner to that floor before seating them (mirrors handleLeaveMeeting's
+    // floor-aware return). Stepping into a meeting is an explicit Join click, so
+    // moving the avatar — including across floors — is consented (human agency).
+    // Without this, a player off the room's floor would be teleported to the
+    // room's (x,y) but stay on their own floor, landing in an empty tile away
+    // from the other participants.
+    if (map.id !== currentFloorId) {
+      this.changeFloor(client, snap, currentFloorId, map.id, anchor.x, anchor.y, snap.dir);
+      return;
+    }
+
     this.teleport(client.sessionId, anchor.x, anchor.y);
 
     // Visible to ALL ON THE FLOOR. Do NOT change manual status — IN_MEETING comes
     // from the calendar source already (the presence engine handles it).
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: anchor.x, y: anchor.y };
-    this.broadcastToFloor(snap?.floorId ?? this.groundFloorId, S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(currentFloorId, S2C.PLAYER_TELEPORTED, tp);
   }
 
   private handleLeaveMeeting(client: Client): void {

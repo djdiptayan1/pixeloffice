@@ -71,36 +71,6 @@ function poseDirFor(dir: Direction): SheetDir {
   return dir as SheetDir;
 }
 
-/** Server-side lounge game station ids (see Wire protocol / room handlers). */
-type GameStationId =
-  | "lounge:pool"
-  | "lounge:ping-pong"
-  | "lounge:tic-tac-toe"
-  | "lounge:connect-four";
-
-/**
- * Maps a playable furniture piece to the lounge game it launches + its [E]
- * prompt. The prompt names the game on the prop so the affordance is honest
- * regardless of which floor the furniture sits on.
- */
-const GAME_STATIONS: Partial<
-  Record<FurnitureKind, { gameId: GameStationId; prompt: string }>
-> = {
-  "pool-table": { gameId: "lounge:pool", prompt: "Press [E] to play Pool" },
-  "ping-pong-table": {
-    gameId: "lounge:ping-pong",
-    prompt: "Press [E] to play Table Tennis",
-  },
-  "arcade-cabinet": {
-    gameId: "lounge:connect-four",
-    prompt: "Press [E] to play Connect Four",
-  },
-  "chess-table": {
-    gameId: "lounge:tic-tac-toe",
-    prompt: "Press [E] to play Tic-Tac-Toe",
-  },
-};
-
 interface Avatar {
   snap: PlayerSnapshot;
   sprite: Phaser.GameObjects.Sprite;
@@ -701,26 +671,6 @@ export class OfficeScene extends Phaser.Scene {
     this.currentPromptBoard = undefined;
     this.currentPortalLabel = null;
     this.cb.onInteractPrompt(null);
-  }
-
-  /**
-   * If (x,y) is on or adjacent to a playable game furniture piece on the
-   * current floor, return its station id + prompt text; otherwise undefined.
-   * Adjacency is checked against the piece's full footprint (w×h), so multi-tile
-   * tables (pool/ping-pong) prompt from the ring of tiles around them.
-   */
-  private gameStationNear(
-    x: number,
-    y: number,
-  ): { gameId: GameStationId; prompt: string } | undefined {
-    for (const f of this.map.furniture) {
-      const station = GAME_STATIONS[f.kind as FurnitureKind];
-      if (!station) continue;
-      const nearX = x >= f.x - 1 && x <= f.x + f.w;
-      const nearY = y >= f.y - 1 && y <= f.y + f.h;
-      if (nearX && nearY) return station;
-    }
-    return undefined;
   }
 
   private tileOccupied(x: number, y: number): boolean {
