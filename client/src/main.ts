@@ -77,6 +77,12 @@ import { mountOnboarding, type OnboardingHandle } from "./ui/onboarding";
 import { createMapStudio, type MapStudioHandle } from "./ui/map-studio";
 import { mountProximityCall, type ProximityCallHandle } from "./ui/proximity-call";
 import { mountWhiteboard, type WhiteboardHandle } from "./ui/whiteboard";
+import { appRedirectForPublicHash, routeForPath } from "./public-routes";
+import { renderPublicPage } from "./public-pages";
+
+function bootOffice(): void {
+document.body.classList.remove("public-route");
+document.body.classList.add("office-route");
 
 const gameRoot = document.getElementById("game-root")!;
 const hudRoot = document.getElementById("hud-root")!;
@@ -845,4 +851,18 @@ function serverDownMessage(err: unknown): string {
     return "Could not reach the office server. Is it running on :2567?";
   }
   return msg || "Could not join the office.";
+}
+}
+
+const redirect = appRedirectForPublicHash(location.pathname, location.hash);
+if (redirect) {
+  location.replace(redirect);
+} else {
+  const route = routeForPath(location.pathname);
+  if (route === "app") {
+    bootOffice();
+  } else {
+    const publicRoot = document.getElementById("public-root")!;
+    renderPublicPage(route, publicRoot);
+  }
 }

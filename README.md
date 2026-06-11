@@ -165,7 +165,7 @@ office keeps working. Copy `.env.example` to `.env` and uncomment only what you 
 | `JWT_EXPIRES_IN` | `12h` | Token lifetime (jsonwebtoken format). |
 | `AUTH_REQUIRED` | `false` | When `true`, a valid JWT is required to join and an admin JWT for admin writes. |
 | `ADMIN_EMAILS` | _(empty)_ | Comma-separated emails granted the `admin` role. |
-| `CLIENT_APP_URL` | `http://localhost:5173` | Where the browser is redirected after an OAuth callback. |
+| `CLIENT_APP_URL` | dynamic | Optional override for where the browser is redirected after OAuth. Unset uses `http://localhost:5173/app` for local redirect bases, or `${OAUTH_REDIRECT_BASE}/app` for non-local bases such as `https://pixeloffice.app`. |
 | `DEFAULT_DEPARTMENT` | `Engineering` | Department for OAuth users who don't pick one. |
 | `ALLOWED_EMAIL_DOMAINS` | _(empty)_ | Comma-separated domains allowed to sign in via OAuth. Empty = no restriction. |
 | `OAUTH_REDIRECT_BASE` | _(unset)_ | Public base URL of this server; OAuth redirect URIs derive from it. Required to enable OAuth. |
@@ -240,7 +240,7 @@ With neither set the feature is inert: the toggle resolves Remote and nobody mov
 | `SERVE_CLIENT` | `false` | Serve `client/dist` from Express on the API port (single-container deploy; the Docker image sets `true`). |
 | `API_RATE_LIMIT` / `API_RATE_WINDOW_MS` | `60` / `60000` | Token-bucket rate limit on `/api` per client IP (`GET /api/health` never throttled). |
 | `TRUST_PROXY` | `false` | Set `true` behind a reverse proxy to trust `X-Forwarded-For` client IPs. |
-| `CORS_ORIGINS` | `CLIENT_APP_URL` | Comma-separated allowed browser origins for `/api`. Never wildcard in production. |
+| `CORS_ORIGINS` | `https://pixeloffice.app,https://www.pixeloffice.app,http://localhost:5173,http://localhost:4173` | Comma-separated allowed browser origins for `/api`. Never wildcard in production. |
 
 > `.env` is loaded automatically at boot (no `dotenv` dependency — the server uses
 > Node's built-in env-file loader and never overrides real environment variables).
@@ -314,6 +314,17 @@ docker run -d \
   $IMAGE
 
 echo "Container restarted successfully."
+```
+
+Example `pixeloffice.env` values for this host:
+
+```env
+PORT=2567
+CLIENT_APP_URL=https://pixeloffice.app/app
+OAUTH_REDIRECT_BASE=https://pixeloffice.app
+CORS_ORIGINS=https://pixeloffice.app,https://www.pixeloffice.app
+TRUST_PROXY=true
+SERVE_CLIENT=true
 ```
 
 The VM startup metadata runs this script after reboot, so the app should come back

@@ -54,6 +54,13 @@ async function main(): Promise<void> {
   const explicitOrigins = (process.env.CORS_ORIGINS ?? process.env.CLIENT_APP_URL ?? "")
     .split(",")
     .map((o) => o.trim())
+    .map((o) => {
+      try {
+        return new URL(o).origin;
+      } catch {
+        return o;
+      }
+    })
     .filter(Boolean);
   const VITE_PORTS = new Set(["5173", "4173"]);
   const corsOrigin: cors.CorsOptions["origin"] = explicitOrigins.length
