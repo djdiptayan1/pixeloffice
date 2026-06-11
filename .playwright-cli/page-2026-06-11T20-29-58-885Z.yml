@@ -1,0 +1,86 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "Pixel Office home" [ref=e4] [cursor=pointer]:
+      - /url: /
+      - generic [ref=e6]: Pixel Office
+    - navigation "Public navigation" [ref=e7]:
+      - link "Privacy" [ref=e8] [cursor=pointer]:
+        - /url: /privacy
+      - link "Terms" [ref=e9] [cursor=pointer]:
+        - /url: /terms
+      - link "Enter office" [ref=e10] [cursor=pointer]:
+        - /url: /app
+  - main [ref=e11]:
+    - generic [ref=e12]:
+      - generic [ref=e13]:
+        - heading "Pixel Office" [level=1] [ref=e14]
+        - paragraph [ref=e15]: A multiplayer virtual office where presence, meetings, and hallway moments feel alive without turning work into surveillance.
+        - generic [ref=e16]:
+          - link "Enter office" [ref=e17] [cursor=pointer]:
+            - /url: /app
+        - generic "Presence signals" [ref=e19]:
+          - generic [ref=e20]: Available
+          - generic [ref=e22]: In meeting
+          - generic [ref=e24]: Focus
+      - generic "Pixel Office product preview" [ref=e26]:
+        - generic [ref=e27]: Focus
+        - generic [ref=e28]: Join
+        - generic [ref=e29]: Coffee
+        - figure [ref=e30]:
+          - img "Pixel Office virtual workspace with teammates, meeting rooms, desks, lounge games, and social areas" [ref=e31]
+        - generic [ref=e32]:
+          - generic [ref=e33]: Now
+          - strong [ref=e34]: Design sync in Room A
+        - generic [ref=e35]:
+          - generic [ref=e36]: Agency
+          - strong [ref=e37]: Every move is user-clicked
+    - region "Product pillars" [ref=e38]:
+      - article [ref=e39]:
+        - generic [ref=e40]: "01"
+        - heading "Presence that explains itself" [level=2] [ref=e41]
+        - paragraph [ref=e42]: Status comes from explicit choices, calendar meetings, and session activity. The UI shows why someone is available, focused, away, or in a meeting.
+      - article [ref=e43]:
+        - generic [ref=e44]: "02"
+        - heading "Meetings stay human" [level=2] [ref=e45]
+        - paragraph [ref=e46]: Calendar events surface a Join action. Pixel Office never auto-moves an avatar or redirects someone without a click.
+      - article [ref=e47]:
+        - generic [ref=e48]: "03"
+        - heading "Integrations are optional" [level=2] [ref=e49]
+        - paragraph [ref=e50]: Google Calendar, Microsoft, greytHR, Postgres, and Redis sit behind adapters. If they are not configured, the office still runs.
+    - generic [ref=e51]:
+      - figure [ref=e52]:
+        - img "Pixel Office meeting room with a visible Join action" [ref=e53]
+      - generic [ref=e54]:
+        - heading "Meetings appear. People decide." [level=2] [ref=e55]
+        - paragraph [ref=e56]: Google Calendar can light up the right meeting room and show a Meet link, but only a user's explicit Join click seats their avatar.
+        - link "Try the office flow" [ref=e57] [cursor=pointer]:
+          - /url: /app
+    - region "Office atmosphere" [ref=e58]:
+      - img "A warm pixel-art office full of presence, meetings, and lounge interactions" [ref=e59]
+      - generic [ref=e60]:
+        - heading "Designed to feel occupied, not observed." [level=2] [ref=e61]
+        - paragraph [ref=e62]: Ambient spaces, lounge games, profile cards, proximity calls, and floor-aware rooms make the office feel alive while keeping surveillance out of the product.
+    - generic [ref=e63]:
+      - generic [ref=e64]:
+        - heading "Presence, never surveillance" [level=2] [ref=e65]
+        - paragraph [ref=e66]: Pixel Office deliberately avoids keystroke logging, mouse tracking, screenshots, productivity scores, activity ranking, and who-was-where-when history.
+      - list "Privacy boundaries" [ref=e67]:
+        - listitem [ref=e68]: No screenshots
+        - listitem [ref=e69]: No productivity scores
+        - listitem [ref=e70]: No activity ranking
+        - listitem [ref=e71]: No movement history
+    - generic [ref=e72]:
+      - img "Pixel Office open workspace preview" [ref=e73]
+      - generic [ref=e74]:
+        - heading "Bring the office back into view." [level=2] [ref=e75]
+        - paragraph [ref=e76]: Start with zero config locally, then connect OAuth and Calendar when your team is ready.
+        - link "Enter office" [ref=e77] [cursor=pointer]:
+          - /url: /app
+  - contentinfo [ref=e78]:
+    - generic [ref=e79]: © 2026 Pixel Office
+    - link "Privacy" [ref=e80] [cursor=pointer]:
+      - /url: /privacy
+    - link "Terms" [ref=e81] [cursor=pointer]:
+      - /url: /terms
+    - link "Enter office" [ref=e82] [cursor=pointer]:
+      - /url: /app

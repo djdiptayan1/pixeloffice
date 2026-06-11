@@ -18,7 +18,7 @@ import { GoogleOAuthProvider } from "./google-oauth.provider";
 import { MicrosoftOAuthProvider } from "./microsoft-oauth.provider";
 import type { OAuthProvider, OAuthProviderId } from "./oauth-provider";
 
-const DEFAULT_CLIENT_APP_URL = "http://localhost:5173";
+const DEFAULT_LOCAL_CLIENT_APP_URL = "http://localhost:5173/app";
 
 export interface AuthConfig {
   jwt: JwtService;
@@ -59,6 +59,31 @@ function pickDepartment(raw: string | undefined): Department {
     return raw as Department;
   }
   return "Engineering";
+}
+
+function isLocalHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost")
+  );
+}
+
+function defaultClientAppUrl(env: NodeJS.ProcessEnv): string {
+  const explicit = env.CLIENT_APP_URL?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+
+  const redirectBase = env.OAUTH_REDIRECT_BASE?.trim();
+  if (!redirectBase) return DEFAULT_LOCAL_CLIENT_APP_URL;
+
+  try {
+    const u = new URL(redirectBase);
+    if (isLocalHost(u.hostname)) return DEFAULT_LOCAL_CLIENT_APP_URL;
+    return `${u.origin}/app`;
+  } catch {
+    return DEFAULT_LOCAL_CLIENT_APP_URL;
+  }
 }
 
 /** Build a JwtService (exposed so callers can reuse its secret for state). */
@@ -119,7 +144,7 @@ export function buildAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfi
     providers: buildProviders(env),
     adminEmails: parseAdminEmails(env.ADMIN_EMAILS),
     defaultDepartment: pickDepartment(env.DEFAULT_DEPARTMENT),
-    clientAppUrl: (env.CLIENT_APP_URL ?? DEFAULT_CLIENT_APP_URL).replace(/\/+$/, ""),
+    clientAppUrl: defaultClientAppUrl(env),
     authRequired: env.AUTH_REQUIRED === "true",
     stateSecret: jwt.secretForState(),
     allowedEmailDomains: parseAllowedDomains(env.ALLOWED_EMAIL_DOMAINS),
