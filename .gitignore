@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+pixeloffice.env
 *.log
 docs/private/
 

@@ -10,4 +10,4 @@ services:
     environment:
       PORT: "2567"
     ports:
-      - "2567:2567"
+      - "127.0.0.1:2567:2567"
