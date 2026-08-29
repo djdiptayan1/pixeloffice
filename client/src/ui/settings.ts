@@ -103,6 +103,15 @@ export function readHideNpcs(): boolean {
   }
 }
 
+/** Read-only accessor for persisted location sync consent. */
+export function readLocationSync(): boolean {
+  try {
+    return localStorage.getItem(LOCATION_SYNC_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): SettingsHandle {
   const state = readValues();
   // Apply the reduced-motion body class immediately on mount so CSS animations
@@ -312,11 +321,19 @@ export function mountSettings(parent: HTMLElement, cb: SettingsCallbacks): Setti
   toggleBtn.className = "settings-trigger hud-toggle-btn";
   toggleBtn.setAttribute("aria-label", "Toggle HUD");
   toggleBtn.textContent = "👁";
-  toggleBtn.title = "Toggle HUD (Full Screen)";
+  toggleBtn.title = "Hide HUD (Full Screen)";
+
+  const setHudHidden = (hidden: boolean) => {
+    parent.classList.toggle("hud-hidden", hidden);
+    toggleBtn.textContent = hidden ? "👁‍🗨" : "👁";
+    toggleBtn.title = hidden ? "Show HUD" : "Hide HUD (Full Screen)";
+    if (hidden) pop.hidden = true;
+  };
+
   toggleBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    const isHidden = parent.classList.toggle("hud-hidden");
-    toggleBtn.textContent = isHidden ? "👁‍🗨" : "👁";
+    const isHidden = !parent.classList.contains("hud-hidden");
+    setHudHidden(isHidden);
   });
 
   wrap.append(toggleBtn, trigger, pop);
