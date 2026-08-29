@@ -64,7 +64,7 @@ export function mountStaticClient(app: Express, options: StaticClientOptions = {
   // SPA fallback: any GET that isn't an /api route serves index.html so client
   // routing works on refresh. Non-GET and /api requests are left untouched.
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.method !== "GET") return next();
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
     if (req.path.startsWith("/api")) return next();
     res.sendFile(indexHtml);
   });
