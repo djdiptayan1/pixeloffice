@@ -15,6 +15,12 @@
 
 // Must be first: load .env before the container reads process.env.
 import "./load-env";
+// Express 4 does not forward a rejected async handler to error middleware —
+// it becomes an unhandled promise rejection and kills the whole process (this
+// is how a single Redis error in one route took the entire office down). This
+// patches Router methods so every async handler's rejection reaches the
+// terminal error handler below instead. Must load before any router is built.
+import "express-async-errors";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
 import express from "express";
@@ -25,12 +31,14 @@ import { DEFAULT_SERVER_PORT, ROOM_NAME } from "@pixeloffice/shared";
 import { OfficeRoom } from "./rooms/office.room";
 import { createAdminRouter } from "./http/admin.routes";
 import { createMapsRouter } from "./http/maps.routes";
+import { createLocationRouter } from "./http/location.routes";
 import { createAuthRouter } from "./http/auth.routes";
-import { createHrRouter, type SessionUser } from "./http/hr.routes";
-import { emailForName } from "./integrations/hr/mock-greythr.adapter";
+import { createHrRouter } from "./http/hr.routes";
+import { createLiveKitRouter } from "./http/livekit.routes";
 import { createRateLimiter } from "./http/rate-limit";
 import { mountStaticClient, shouldServeClient } from "./http/static-client";
 import { installShutdown } from "./lifecycle/shutdown";
+import { emailForName } from "./integrations/hr/mock-greythr.adapter";
 import { container, initContainer } from "./container";
 
 const PORT = readPort();
@@ -53,6 +61,13 @@ async function main(): Promise<void> {
   const explicitOrigins = (process.env.CORS_ORIGINS ?? process.env.CLIENT_APP_URL ?? "")
     .split(",")
     .map((o) => o.trim())
+    .map((o) => {
+      try {
+        return new URL(o).origin;
+      } catch {
+        return o;
+      }
+    })
     .filter(Boolean);
   const VITE_PORTS = new Set(["5173", "4173"]);
   const corsOrigin: cors.CorsOptions["origin"] = explicitOrigins.length
@@ -99,6 +114,14 @@ async function main(): Promise<void> {
   // Reads open; writes admin-guarded (same pattern as admin routes).
   app.use("/api/maps", createMapsRouter());
 
+  // Location floor-report REST. A companion helper on the user's machine reports
+  // the WiFi SSID; we map it to a floor and apply it to that machine's live
+  // sessions — but ONLY to users who opted in to floor sync (the room enforces
+  // this). PRIVACY: never logs/persists the SSID or IP. Self-report has no abuse
+  // surface, so the shared secret (FLOOR_SYNC_SECRET) is optional. Honors the
+  // same trust-proxy decision as the rate limiter.
+  app.use("/api/location", createLocationRouter({ trustProxy, resolver: container.ssidFloor }));
+
   // OAuth + session routes. With no providers configured the login/callback
   // routes 404 and /config reports an empty provider list (dev path unaffected).
   app.use(
@@ -141,9 +164,14 @@ async function main(): Promise<void> {
   );
 
   // HR / GreytHR routes. Resolves a live sessionId -> the user behind it so the
-  // client can never act for someone else. Uses the mock adapter unless GreytHR
-  // env is set; the client widget self-hides when status 404s.
-  app.use(
+  // client can never act for someone else. ONLY mounted when greytHR is actually
+  // configured (GREYTHR_LOGIN_ENABLED). In zero-config dev there is no HR backend
+  // (no mock adapter exists), so leaving /api/hr unmounted makes GET /api/hr/status
+  // fall through to the /api 404 catch-all — which is exactly the signal the client
+  // attendance widget self-hides on (404/!ok), instead of showing a check-in
+  // button that 502s on every press.
+  if (container.hrConfigured)
+    app.use(
     "/api/hr",
     createHrRouter({
       attendance: container.attendance,
@@ -170,6 +198,16 @@ async function main(): Promise<void> {
         // hits. When OAuth provides a real email, surface it here instead.
         return { userId: p.userId, name: p.name, email: emailForName(p.name) };
       },
+    }),
+  );
+
+  // LiveKit SFU integration (audio/video for 10-12 concurrent participants).
+  app.use(
+    "/api/livekit",
+    createLiveKitRouter({
+      url: process.env.LIVEKIT_URL,
+      apiKey: process.env.LIVEKIT_API_KEY,
+      apiSecret: process.env.LIVEKIT_API_SECRET,
     }),
   );
 
@@ -208,7 +246,10 @@ async function main(): Promise<void> {
   const httpServer = createServer(app);
 
   const gameServer = new Server({
-    transport: new WebSocketTransport({ server: httpServer }),
+    transport: new WebSocketTransport({
+      server: httpServer,
+      maxPayload: 5 * 1024 * 1024, // 5 MB (Ample headroom for signaling 12+ peers & board states)
+    }),
     // Our lifecycle module owns SIGINT/SIGTERM; Colyseus's built-in handler
     // would race it and log "already_shutting_down" (seen in live logs).
     gracefullyShutdown: false,

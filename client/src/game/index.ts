@@ -30,6 +30,13 @@ export interface OfficeGameHandle {
   showEmote(sessionId: string, emote: string): void;
   /** Smooth-pan the camera to an avatar, then resume following self. Never moves avatars. */
   panToPlayer(sessionId: string): void;
+  /**
+   * Smooth-pan the camera to the nearest elevator/portal on the CURRENT floor,
+   * then resume following self. Camera-only — never moves the avatar (the player
+   * must still walk into the elevator). No-op (returns false) on a floor with no
+   * portals.
+   */
+  panToNearestPortal(): boolean;
   /** Set the camera zoom (clamped to ZOOM_MIN..ZOOM_MAX) with a smooth tween. */
   setZoom(zoom: number): void;
   /** Show/hide every NPC avatar (sprite, shadow, tag, badge, bubbles). */
@@ -71,6 +78,8 @@ export interface CreateGameOptions {
   onAreaChange?(areaName: string): void; // local player entered a named area ("Hallway" when none)
   onInteractPrompt?(prompt: string | null, gameId?: string): void;
   onGameInteract?(gameId: string): void;
+  /** Local player pressed [E] at a department's white table (open its board). */
+  onWhiteboardInteract?(department: string): void;
   /** The local user double-clicked their own avatar (open the profile modal). */
   onProfileOpen?(): void;
 }
@@ -104,6 +113,9 @@ export function createOfficeGame(opts: CreateGameOptions): Promise<OfficeGameHan
     // Listen for interact event from the scene and bridge it to the UI
     game.events.on("lounge-game-interact", (gameId: string) => {
       opts.onGameInteract?.(gameId);
+    });
+    game.events.on("whiteboard-interact", (department: string) => {
+      opts.onWhiteboardInteract?.(department);
     });
 
     // Resolve only once the scene's create() has built the local avatar, so the
@@ -152,6 +164,9 @@ function makeHandle(game: Phaser.Game, scene: OfficeScene): OfficeGameHandle {
     },
     panToPlayer(sessionId) {
       scene.apiPanToPlayer(sessionId);
+    },
+    panToNearestPortal() {
+      return scene.apiPanToNearestPortal();
     },
     setZoom(zoom) {
       scene.apiSetZoom(zoom);

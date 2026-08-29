@@ -14,6 +14,7 @@
 import Phaser from "phaser";
 import {
   EMOTE_EMOJI,
+  MAIN_OFFICE_FLOOR_ID,
   PresenceState,
   areaAt,
   buildOfficeMap,
@@ -143,6 +144,8 @@ export class OfficeScene extends Phaser.Scene {
   private panResumeTimer?: Phaser.Time.TimerEvent;
   private keyE!: Phaser.Input.Keyboard.Key;
   private currentPromptGameId?: string;
+  /** Department whose white table the player is standing next to (for [E]). */
+  private currentPromptBoard?: string;
 
   constructor() {
     super({ key: "office" });
@@ -234,9 +237,26 @@ export class OfficeScene extends Phaser.Scene {
   }
 
   private triggerInteraction(): void {
+    if (this.currentPromptBoard) {
+      this.game.events.emit("whiteboard-interact", this.currentPromptBoard);
+      return;
+    }
     if (this.currentPromptGameId) {
       this.game.events.emit("lounge-game-interact", this.currentPromptGameId);
     }
+  }
+
+  /** Department of a `whiteboard` table within one tile of (x,y), else null. */
+  private whiteboardDeptNear(x: number, y: number): string | null {
+    for (const f of this.map.furniture) {
+      if (f.kind !== "whiteboard") continue;
+      // One-tile ring around the table's footprint (f.w × f.h tiles).
+      if (x < f.x - 1 || x > f.x + f.w) continue;
+      if (y < f.y - 1 || y > f.y + f.h) continue;
+      const area = areaAt(this.map, f.x, f.y);
+      if (area?.department) return area.department;
+    }
+    return null;
   }
 
   // -------------------------------------------------------------------------
@@ -482,6 +502,8 @@ export class OfficeScene extends Phaser.Scene {
   private applyDepth(a: Avatar): void {
     a.sprite.setDepth(DEPTH_ENTITY_BASE + a.sprite.y);
     a.shadow.setDepth(DEPTH_ENTITY_BASE + a.sprite.y - 1);
+    a.nameTag.setDepth(DEPTH_OVERLAY + a.sprite.y);
+    a.badge.setDepth(DEPTH_OVERLAY + a.sprite.y);
   }
 
   private applyFacing(a: Avatar): void {
@@ -603,9 +625,21 @@ export class OfficeScene extends Phaser.Scene {
   private checkGameProximity(x: number, y: number): void {
     if (!this.cb.onInteractPrompt) return;
 
-    // Lounge games physically live only on the ground floor (per the multi-floor
-    // contract). On any other floor these tiles are ordinary, so skip the prompts.
-    if (this.floorId === "ground") {
+    // Department white tables: press [E] to open that team's Excalidraw board.
+    // Checked before games (a table can sit on any department floor).
+    const board = this.whiteboardDeptNear(x, y);
+    if (board) {
+      this.currentPromptBoard = board;
+      this.currentPromptGameId = undefined;
+      this.cb.onInteractPrompt(`Press [E] to open the ${board} Whiteboard`);
+      return;
+    }
+    this.currentPromptBoard = undefined;
+
+    // Game stations live only on the rich main-office floor. Gate on its stable
+    // id (not the literal "ground") so the floor reorder can't silently hide the
+    // [E] prompts. On other floors these tiles are ordinary.
+    if (this.floorId === MAIN_OFFICE_FLOOR_ID) {
       // Ping Pong: x: 38..40, y: 21..22
       if (x >= 37 && x <= 41 && y >= 20 && y <= 23) {
         this.currentPromptGameId = "lounge:ping-pong";
@@ -636,6 +670,7 @@ export class OfficeScene extends Phaser.Scene {
     }
 
     this.currentPromptGameId = undefined;
+    this.currentPromptBoard = undefined;
     this.currentPortalLabel = null;
     this.cb.onInteractPrompt(null);
   }
@@ -845,6 +880,39 @@ export class OfficeScene extends Phaser.Scene {
     this.cameras.main.stopFollow();
     this.cameras.main.pan(a.sprite.x, a.sprite.y, this.reducedMotion ? 0 : PAN_MS, "Sine.easeInOut");
     this.panResumeTimer = this.time.delayedCall(PAN_RESUME_MS, () => this.resumeFollowSelf());
+  }
+
+  /**
+   * Camera-only pan to the nearest portal (elevator) on the CURRENT floor, then
+   * resume following self. Never moves the avatar (human agency — the player
+   * still has to walk into the elevator themselves). No-op when this floor has
+   * no portals. Returns true if a portal was found and panned to.
+   */
+  apiPanToNearestPortal(): boolean {
+    if (this.portals.length === 0) return false;
+    const self = this.avatars.get(this.selfId);
+    const fromX = self?.snap.x ?? this.selfStart.x;
+    const fromY = self?.snap.y ?? this.selfStart.y;
+    let nearest = this.portals[0];
+    let best = Infinity;
+    for (const p of this.portals) {
+      const d = Math.abs(p.x - fromX) + Math.abs(p.y - fromY);
+      if (d < best) {
+        best = d;
+        nearest = p;
+      }
+    }
+    this.panResumeTimer?.remove();
+    this.panResumeTimer = undefined;
+    this.cameras.main.stopFollow();
+    this.cameras.main.pan(
+      nearest.x * TILE + TILE / 2,
+      nearest.y * TILE + TILE / 2,
+      this.reducedMotion ? 0 : PAN_MS,
+      "Sine.easeInOut",
+    );
+    this.panResumeTimer = this.time.delayedCall(PAN_RESUME_MS, () => this.resumeFollowSelf());
+    return true;
   }
 
   private resumeFollowSelf(): void {

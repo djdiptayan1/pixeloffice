@@ -1,0 +1,9 @@
+pixeloffice.app {
+  	tls internal
+  	reverse_proxy 127.0.0.1:2567
+  }
+
+  www.pixeloffice.app {
+  	tls internal
+  	redir https://pixeloffice.app{uri} permanent
+  }

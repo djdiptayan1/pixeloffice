@@ -39,6 +39,13 @@ import {
   type GameUpdatePayload,
   type FloorChangedPayload,
   type LocationPayload,
+  type FloorSyncCodePayload,
+  type RtcCallS2C,
+  type RtcSignalS2C,
+  type WhiteboardStateS2C,
+  type WhiteboardUpdateS2C,
+  type WhiteboardClearS2C,
+  type Department,
   type Building,
   type Floor,
   type PlayerSnapshot,
@@ -68,10 +75,32 @@ import { mountMinimap, type MinimapHandle } from "./ui/minimap";
 import { mountSettings, readHideNpcs, type SettingsHandle } from "./ui/settings";
 import { mountOnboarding, type OnboardingHandle } from "./ui/onboarding";
 import { createMapStudio, type MapStudioHandle } from "./ui/map-studio";
+import { mountProximityCall, type ProximityCallHandle } from "./ui/proximity-call";
+import { mountWhiteboard, type WhiteboardHandle } from "./ui/whiteboard";
+import { appRedirectForPublicHash, routeForPath } from "./public-routes";
+import { renderPublicPage } from "./public-pages";
+
+function bootOffice(): void {
+  if (typeof Notification !== "undefined" && Notification.permission === "default") {
+    void Notification.requestPermission();
+  }
+  document.body.classList.remove("public-route");
+  document.body.classList.add("office-route");
 
 const gameRoot = document.getElementById("game-root")!;
 const hudRoot = document.getElementById("hud-root")!;
 const loginRoot = document.getElementById("login-root")!;
+
+// Bottom-left widget stack. The calendar-connect + attendance cards are
+// independently mounted (and self-hide when their integration is absent), but
+// they share the bottom-left corner with the chat input. Anchoring them at fixed
+// `bottom` offsets made them overlap each other when both were visible (their
+// heights vary). Instead we mount both into ONE flex column anchored just above
+// the chat region, so they stack cleanly regardless of height and never collide.
+// Persists across reconnects (a HUD-root sibling, like toasts/banner/admin).
+const bottomLeftStack = document.createElement("div");
+bottomLeftStack.id = "hud-bl-stack";
+hudRoot.appendChild(bottomLeftStack);
 
 const toasts = new Toasts(hudRoot);
 const banner = mountConnectionBanner(hudRoot);
@@ -125,6 +154,14 @@ let onboarding: OnboardingHandle | null = null;
 // reconnects (like admin/settings). It is self-contained: it fetches/saves
 // buildings through /api/maps and never touches the live game or avatars.
 let mapStudio: MapStudioHandle | null = null;
+// Proximity voice/video. Rebuilt per session (binds to the live store +
+// connection). Subscribes to the store to surface call buttons within 2 tiles
+// and auto-mutes/ends a call on leaving proximity. Media is P2P WebRTC; the
+// server only relays signaling.
+let proximityCall: ProximityCallHandle | null = null;
+// Per-department collaborative whiteboards. Rebuilt per session (binds to the
+// live store + connection). Strokes sync through the server; never floor-scoped.
+let whiteboard: WhiteboardHandle | null = null;
 
 // Cached active building geometry (parsed from GET /api/maps/active). Multi-floor
 // rendering needs the full Floor geometry (areas/solid/desks/portals), but
@@ -133,6 +170,10 @@ let mapStudio: MapStudioHandle | null = null;
 // a floor change does not block on the network. Refetched on each (re)boot.
 let activeBuilding: Building | null = null;
 let buildingFetch: Promise<Building | null> | null = null;
+// The floor geometry the minimap should draw. The WELCOME floor fetch may resolve
+// before the minimap is mounted, so we stash the resolved floor here and apply it
+// right after mountMinimap (and on every FLOOR_CHANGED).
+let pendingMinimapFloor: Floor | null = null;
 
 /** Fetch + parse the active building geometry once, caching the promise so
  *  concurrent callers (WELCOME + a quick FLOOR_CHANGED) share one request. */
@@ -271,6 +312,7 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   // may follow an admin map re-activation (new joins get the new active building).
   activeBuilding = null;
   buildingFetch = null;
+  pendingMinimapFloor = null;
 
   selfId = welcome.self.sessionId;
   const localStore = new Store(selfId);
@@ -310,43 +352,55 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onGameInteract: (gameId) => {
       conn.send(C2S.JOIN_GAME, { gameId });
     },
-    // Double-clicking the local avatar opens the profile modal.
-    onProfileOpen: () => {
-      const self = localStore.self();
-      if (!self) return;
-      openProfileModal({
-        parent: hudRoot,
-        current: { name: self.name, department: self.department, avatarId: self.avatarId },
-        onSave: (draft) => {
-          conn.send(C2S.UPDATE_PROFILE, draft);
-          // Keep reconnects + the next session in sync with the edit.
-          conn.updateJoinProfile(draft);
-          persistLoginProfile(draft);
-          // Optimistic local apply; the server also broadcasts PLAYER_UPDATED.
-          localGame.updatePlayer(selfId, draft);
-          localStore.upsertPlayer({ ...self, ...draft });
-        },
-        onLogout: () => {
-          void (async () => {
-            // End the real greytHR session server-side (best-effort), then drop
-            // the local token and return to the sign-in screen.
-            const token = readStoredToken();
-            try {
-              await fetch(`${serverHttpBase()}/api/auth/greythr/logout`, {
-                method: "POST",
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-              });
-            } catch {
-              /* best-effort: still sign out locally */
-            }
-            clearStoredToken();
-            conn.close(); // "offline" -> teardown + login screen
-          })();
-        },
-      });
+    // Walking to a department's white table + [E] opens that team's Excalidraw
+    // board. The board overlay is created lazily by the whiteboard controller.
+    onWhiteboardInteract: (department) => {
+      whiteboard?.open(department as Department);
     },
+    // Double-clicking the local avatar opens the profile modal. The same editor
+    // is reachable from the HUD status menu's "Edit profile" item (wired below)
+    // so it is not solely behind the easy-to-miss double-click gesture.
+    onProfileOpen: () => openSelfProfileEditor(),
   });
   game = localGame;
+
+  // Open the LOCAL user's profile editor. Shared by the scene's double-click
+  // gesture and the HUD status menu's "Edit profile" item so editing your
+  // identity is discoverable, not solely behind the easy-to-miss double-click.
+  function openSelfProfileEditor(): void {
+    const self = localStore.self();
+    if (!self) return;
+    openProfileModal({
+      parent: hudRoot,
+      current: { name: self.name, department: self.department, avatarId: self.avatarId },
+      onSave: (draft) => {
+        conn.send(C2S.UPDATE_PROFILE, draft);
+        // Keep reconnects + the next session in sync with the edit.
+        conn.updateJoinProfile(draft);
+        persistLoginProfile(draft);
+        // Optimistic local apply; the server also broadcasts PLAYER_UPDATED.
+        localGame.updatePlayer(selfId, draft);
+        localStore.upsertPlayer({ ...self, ...draft });
+      },
+      onLogout: () => {
+        void (async () => {
+          // End the real greytHR session server-side (best-effort), then drop
+          // the local token and return to the sign-in screen.
+          const token = readStoredToken();
+          try {
+            await fetch(`${serverHttpBase()}/api/auth/greythr/logout`, {
+              method: "POST",
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+            });
+          } catch {
+            /* best-effort: still sign out locally */
+          }
+          clearStoredToken();
+          conn.close(); // "offline" -> teardown + login screen
+        })();
+      },
+    });
+  }
 
   // Render existing remote players into the scene.
   for (const p of welcome.players) localGame.addPlayer(p);
@@ -361,6 +415,10 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     const floor = await floorGeometry(welcome.self.floorId ?? "ground");
     if (!floor || game !== localGame) return;
     localGame.setActiveFloor(floor, welcome.self, welcome.players);
+    // Point the minimap at the player's actual floor (it is created below, but
+    // may not exist yet if this resolves first — re-applied after mount too).
+    minimap?.setFloor(floor);
+    pendingMinimapFloor = floor;
   })();
 
   // Build the HUD now that we can wire its actions to the connection + game.
@@ -384,7 +442,13 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onJoinGame: (gameId, mode) => conn.send(C2S.JOIN_GAME, { gameId, mode }),
     onLocate: (sessionId) => locate(sessionId),
     onOpenProfile: (sessionId) => openProfile(sessionId),
+    onEditSelfProfile: () => openSelfProfileEditor(),
     isNpcHidden: () => readHideNpcs(),
+    // Camera-only "Find the elevator": pan to the nearest portal on the current
+    // floor. Never moves the avatar (human agency — the player walks in to ride).
+    onLocateElevator: () => {
+      game?.panToNearestPortal();
+    },
   });
 
   const localHud = hud;
@@ -407,23 +471,34 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     }
   };
 
+  // Bottom-left stack order (top → bottom): "Connect Google Calendar" then the
+  // attendance card, sitting just above the chat input. Both mount into the shared
+  // flex column (#hud-bl-stack) so they stack without overlap and either self-hides
+  // when its integration is absent (the column collapses the empty slot).
+
+  // "Connect Google Calendar" widget self-hides if Google is not configured
+  // (status 404) — integrations are optional; the office is unaffected. Mount
+  // once and refresh on later reconnects (mirrors attendance/admin/settings) so
+  // a WELCOME re-seed never stacks duplicate widgets.
+  if (!calendarConnect) {
+    calendarConnect = mountCalendarConnect(bottomLeftStack, {
+      fetchBase: serverHttpBase(),
+      getSessionId: liveSessionId,
+    });
+  } else {
+    void calendarConnect.refresh();
+  }
+
   // Attendance widget self-hides if the HR integration is absent (status 404).
   // Mount once; reusing the instance across reconnects avoids stacking widgets.
   if (!attendance) {
-    attendance = mountAttendance(hudRoot, {
+    attendance = mountAttendance(bottomLeftStack, {
       fetchBase: serverHttpBase(),
       getSessionId: liveSessionId,
     });
   } else {
     void attendance.refresh();
   }
-
-  // "Connect Google Calendar" widget self-hides if Google is not configured
-  // (status 404) — integrations are optional; the office is unaffected.
-  calendarConnect = mountCalendarConnect(hudRoot, {
-    fetchBase: serverHttpBase(),
-    getSessionId: liveSessionId,
-  });
 
   // --- Round features: emote bar, profile card, minimap, settings, tour -----
 
@@ -432,6 +507,28 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   // when S2C.EMOTE comes back from the server (handled in the bridge).
   emoteBar = mountEmoteBar(localHud.chatBar(), {
     onEmote: (emote: Emote) => conn.send(C2S.EMOTE, { emote }),
+  });
+
+  // Proximity voice/video (per session). Subscribes to the store internally to
+  // detect who is within 2 tiles, surfaces the Speak/Video buttons, and drives
+  // the WebRTC calls. C2S goes over the live connection; the S2C relay messages
+  // are routed in here from the bridge below.
+  proximityCall = mountProximityCall(hudRoot, {
+    store: localStore,
+    getSelfId: () => selfId,
+    sendCall: (payload) => conn.send(C2S.RTC_CALL, payload),
+    sendSignal: (payload) => conn.send(C2S.RTC_SIGNAL, payload),
+    toast: (message) => toasts.show(message, "info"),
+  });
+
+  // Per-department Excalidraw whiteboard (per session). Opened by walking to a
+  // department's white table and pressing [E]; locks avatar movement while open.
+  whiteboard = mountWhiteboard(hudRoot, {
+    open: (b) => conn.send(C2S.WHITEBOARD_OPEN, { board: b }),
+    close: (b) => conn.send(C2S.WHITEBOARD_CLOSE, { board: b }),
+    update: (b, elements) => conn.send(C2S.WHITEBOARD_UPDATE, { board: b, elements }),
+    clear: (b) => conn.send(C2S.WHITEBOARD_CLEAR, { board: b }),
+    onOpenChange: (isOpen) => game?.setInputLocked(isOpen),
   });
 
   // Profile card (per session — its Wave button emotes from the live connection).
@@ -445,6 +542,9 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
     onLocate: (sessionId) => locate(sessionId),
     isNpcHidden: () => readHideNpcs(),
   });
+  // If the WELCOME floor geometry already resolved (it loads concurrently above),
+  // point the freshly-mounted minimap at it so it never lingers on the ground map.
+  if (pendingMinimapFloor) minimap.setFloor(pendingMinimapFloor);
 
   // Settings popover + onboarding tour mount ONCE and persist across reconnects
   // (like admin). They read the LIVE game handle lazily through the `game` ref,
@@ -466,6 +566,9 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
       // Both are handled idempotently in the bridge below. No-op pre-connect.
       onLocationSync: (enabled) => {
         activeConn?.send(C2S.SET_LOCATION_SYNC, { enabled });
+        // Turning sync off invalidates the server-side pairing code; clear the
+        // one shown in Settings so a stale code is never displayed/copied.
+        if (!enabled) settings?.setPairCode(null);
       },
       onShowTour: () => onboarding?.start(),
     });
@@ -534,6 +637,9 @@ function registerBridge(conn: Connection): void {
 
   conn.on<PlayerLeftPayload>(S2C.PLAYER_LEFT, ({ sessionId }) => {
     if (!game || !store) return;
+    // Tear down any proximity call with the departing peer BEFORE the store drops
+    // them (so the controller can still resolve their name for the toast).
+    proximityCall?.handlePeerGone(sessionId);
     store.removePlayer(sessionId);
     game.removePlayer(sessionId);
   });
@@ -575,6 +681,22 @@ function registerBridge(conn: Connection): void {
   // self + everyone (presence, not surveillance: ephemeral, nothing stored).
   conn.on<EmoteBroadcastPayload>(S2C.EMOTE, ({ sessionId, emote }) => {
     game?.showEmote(sessionId, emote);
+    const player = store?.get().players.get(sessionId);
+    if (player && sessionId !== selfId) {
+      const typeKey = String(emote).toUpperCase();
+      const action =
+        typeKey === "WAVE" ? "waved 👋" :
+        typeKey === "THUMB" ? "gave a thumbs up 👍" :
+        typeKey === "COFFEE" ? "wants a coffee break ☕" :
+        typeKey === "HEART" ? "sent a heart ❤️" : "sent an emote";
+      
+      const msg = `${player.name} ${action}`;
+      toasts.show(msg, "info");
+      
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification("PixelOffice", { body: msg });
+      }
+    }
   });
 
   conn.on<EventCreatedPayload>(S2C.EVENT_CREATED, ({ event }) => {
@@ -617,6 +739,35 @@ function registerBridge(conn: Connection): void {
   conn.on<LocationPayload>(S2C.LOCATION, ({ sessionId, place, cleared }) => {
     if (!store) return;
     store.setPlace(sessionId, cleared ? undefined : place);
+  });
+
+  // Companion PAIRING CODE for THIS session (sent right after we enabled floor
+  // sync). Surface it in Settings: the WiFi help block then shows the exact
+  // companion command WITH the code, so a floor report is tied to this session
+  // regardless of IP (NAT / VPN / Docker / multiple localhost tabs). Transient
+  // per-session — never persisted.
+  conn.on<FloorSyncCodePayload>(S2C.FLOOR_SYNC_CODE, ({ code }) => {
+    settings?.setPairCode(code);
+  });
+
+  // Proximity call relay (P2P WebRTC). The server validated these came from a
+  // same-floor peer; the controller owns the call state machine + media.
+  conn.on<RtcCallS2C>(S2C.RTC_CALL, (payload) => {
+    proximityCall?.handleCall(payload);
+  });
+  conn.on<RtcSignalS2C>(S2C.RTC_SIGNAL, (payload) => {
+    proximityCall?.handleSignal(payload);
+  });
+
+  // Whiteboard sync (department-scoped). The controller owns the canvas state.
+  conn.on<WhiteboardStateChunkS2C>(S2C.WHITEBOARD_STATE_CHUNK, (payload) => {
+    whiteboard?.handleStateChunk(payload);
+  });
+  conn.on<WhiteboardUpdateS2C>(S2C.WHITEBOARD_UPDATE, (payload) => {
+    whiteboard?.handleUpdate(payload);
+  });
+  conn.on<WhiteboardClearS2C>(S2C.WHITEBOARD_CLEAR, (payload) => {
+    whiteboard?.handleClear(payload);
   });
 
   // Floor change: sent ONLY to the player whose own avatar stepped onto a portal
@@ -669,6 +820,10 @@ function registerBridge(conn: Connection): void {
       if (game !== localGame) return; // a reconnect re-booted under us
       if (floor) {
         localGame.setActiveFloor(floor, self, payload.players);
+        // Swap the minimap to the destination floor's geometry so it never shows
+        // the wrong floor after an elevator crossing.
+        minimap?.setFloor(floor);
+        pendingMinimapFloor = floor;
       }
     })();
   });
@@ -688,6 +843,10 @@ function teardownSession(): void {
   emoteBar = null;
   profileCard?.destroy();
   profileCard = null;
+  proximityCall?.destroy();
+  proximityCall = null;
+  whiteboard?.destroy();
+  whiteboard = null;
   minimap?.destroy();
   minimap = null;
   clearFollowChip();
@@ -711,4 +870,18 @@ function serverDownMessage(err: unknown): string {
     return "Could not reach the office server. Is it running on :2567?";
   }
   return msg || "Could not join the office.";
+}
+}
+
+const redirect = appRedirectForPublicHash(location.pathname, location.hash);
+if (redirect) {
+  location.replace(redirect);
+} else {
+  const route = routeForPath(location.pathname);
+  if (route === "app") {
+    bootOffice();
+  } else {
+    const publicRoot = document.getElementById("public-root")!;
+    renderPublicPage(route, publicRoot);
+  }
 }

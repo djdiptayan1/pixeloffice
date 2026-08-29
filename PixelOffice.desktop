@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PixelOffice
+Comment=Start the PixelOffice virtual office (Docker) and open it in the browser
+# Runs the one-click launcher in a terminal so you can see build/startup progress.
+# After copying this file to ~/.local/share/applications/ or your Desktop, mark it
+# trusted (right-click → Allow Launching) and edit Exec/Path below if the repo
+# lives somewhere other than /home/aryan/officeoffice.
+Exec=bash -lc 'cd /home/aryan/officeoffice && ./start-office.sh; echo; read -n1 -r -p "Press any key to close…"'
+Path=/home/aryan/officeoffice
+Terminal=true
+Icon=utilities-terminal
+Categories=Network;Game;

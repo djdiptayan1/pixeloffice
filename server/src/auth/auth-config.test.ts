@@ -12,7 +12,7 @@ describe("buildAuthConfig — provider gating", () => {
     expect(cfg.authRequired).toBe(false);
     expect(cfg.jwt.ephemeral).toBe(true);
     expect(cfg.defaultDepartment).toBe("Engineering");
-    expect(cfg.clientAppUrl).toBe("http://localhost:5173");
+    expect(cfg.clientAppUrl).toBe("http://localhost:5173/app");
   });
 
   it("does not enable a provider missing the redirect base", () => {
@@ -70,6 +70,28 @@ describe("buildAuthConfig — provider gating", () => {
     expect(cfg.defaultDepartment).toBe("Product");
     expect(cfg.clientAppUrl).toBe("https://office.company.com");
     expect(cfg.jwt.ephemeral).toBe(false);
+  });
+
+  it("derives the production client app URL from a non-local redirect base", () => {
+    const cfg = buildAuthConfig(
+      env({
+        GOOGLE_CLIENT_ID: "id",
+        GOOGLE_CLIENT_SECRET: "secret",
+        OAUTH_REDIRECT_BASE: "https://pixeloffice.app",
+      }),
+    );
+    expect(cfg.clientAppUrl).toBe("https://pixeloffice.app/app");
+  });
+
+  it("keeps localhost client app URL on local redirect bases", () => {
+    const cfg = buildAuthConfig(
+      env({
+        GOOGLE_CLIENT_ID: "id",
+        GOOGLE_CLIENT_SECRET: "secret",
+        OAUTH_REDIRECT_BASE: "http://localhost:2567",
+      }),
+    );
+    expect(cfg.clientAppUrl).toBe("http://localhost:5173/app");
   });
 
   it("builds a valid authorization URL with state + redirect_uri", () => {

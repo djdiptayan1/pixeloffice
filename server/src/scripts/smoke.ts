@@ -259,13 +259,13 @@ async function main(): Promise<void> {
     fail("MEETING_STARTED received after POST /api/meetings", (e as Error).message);
   }
 
-  // 8. MULTI-FLOOR: a fresh client walks onto the ground elevator portal and
-  //    must receive FLOOR_CHANGED for floor-1 (human agency: own movement only).
+  // 8. MULTI-FLOOR: a fresh client walks onto the elevator portal on its OWN
+  //    spawn floor and must receive FLOOR_CHANGED to that portal's target floor
+  //    (human agency: own movement only). New players now spawn on the rich MAIN
+  //    OFFICE floor (the top floor), whose elevator goes DOWN to floor-1.
   try {
     const resp = await fetch(`${HTTP}/api/maps/active`);
     const { building } = (await resp.json()) as { building: BuildingJSON };
-    const ground = building.floors.find((f) => f.index === 0)!;
-    const portal = ground.portals[0];
 
     const clientC = new Client(ENDPOINT);
     const optsC: JoinOptions = { name: "Lift", department: "HR", avatarId: "violet" };
@@ -275,17 +275,31 @@ async function main(): Promise<void> {
     const teleportsC = collector<PlayerTeleportedPayload>(roomC, S2C.PLAYER_TELEPORTED);
     const welcomeC = await waitFor("WELCOME (C)", () => welcomesC[0]);
 
-    // WELCOME must advertise the building (floor list) + the player's floor.
-    if (welcomeC.building && welcomeC.building.floors.length >= 3 && welcomeC.self.floorId === ground.id) {
-      pass(`WELCOME carries building summary (${welcomeC.building.floors.length} floors) + self.floorId`);
+    // The player's actual spawn floor + that floor's elevator portal.
+    const spawnFloorId = welcomeC.self.floorId ?? "ground";
+    const spawnFloor = building.floors.find((f) => f.id === spawnFloorId)!;
+    const portal = spawnFloor.portals[0];
+
+    // WELCOME must advertise the building (floor list) + the player's floor, and
+    // new players spawn on the rich main office (the top floor).
+    const topIndex = Math.max(...building.floors.map((f) => f.index));
+    if (
+      welcomeC.building &&
+      welcomeC.building.floors.length >= 3 &&
+      spawnFloor &&
+      spawnFloor.index === topIndex
+    ) {
+      pass(
+        `WELCOME carries building summary (${welcomeC.building.floors.length} floors) + spawns on main office (${spawnFloorId})`,
+      );
     } else {
-      fail("WELCOME carries building summary + self.floorId", JSON.stringify(welcomeC.building));
+      fail("WELCOME carries building summary + spawns on main office", JSON.stringify(welcomeC.building));
     }
 
     // BFS a path from spawn to the portal tile, then step it one tile per MOVE.
-    const path = bfsPath(ground, { x: welcomeC.self.x, y: welcomeC.self.y }, { x: portal.x, y: portal.y });
+    const path = bfsPath(spawnFloor, { x: welcomeC.self.x, y: welcomeC.self.y }, { x: portal.x, y: portal.y });
     if (!path) {
-      fail("BFS path to ground elevator portal");
+      fail("BFS path to the spawn-floor elevator portal");
     } else {
       let prevDir: Direction = welcomeC.self.dir;
       for (const step of path) {
@@ -296,14 +310,24 @@ async function main(): Promise<void> {
       }
       void prevDir;
       const fc = await waitFor(
-        "FLOOR_CHANGED to floor-1",
-        () => floorChangesC.find((m) => m.selfFloorId !== ground.id),
+        "FLOOR_CHANGED to the portal target floor",
+        () => floorChangesC.find((m) => m.selfFloorId !== spawnFloorId),
         7000,
       );
       if (fc.selfFloorId === portal.toFloorId) {
         pass(`FLOOR_CHANGED to ${fc.selfFloorId} after stepping onto the elevator`);
       } else {
         fail("FLOOR_CHANGED to the portal target floor", JSON.stringify(fc));
+      }
+      // The mover lands on a walkable, NON-portal tile beside the return elevator
+      // (lift lobby — must not re-trigger a crossing).
+      const destFloor = building.floors.find((f) => f.id === fc.selfFloorId)!;
+      const landsOnPortal = destFloor.portals.some((p) => p.x === fc.x && p.y === fc.y);
+      const landsWalkable = destFloor.solid[fc.y][fc.x] !== true;
+      if (landsWalkable && !landsOnPortal) {
+        pass(`elevator deposit lands on a walkable non-portal tile (${fc.x},${fc.y})`);
+      } else {
+        fail("elevator deposit lands on a walkable non-portal tile", `(${fc.x},${fc.y})`);
       }
       // The mover should NOT have been teleported by anything other than their
       // own portal step (no auto-teleport on the old floor).

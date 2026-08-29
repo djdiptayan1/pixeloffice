@@ -7,17 +7,19 @@
 // services below stay framework- and auth-agnostic.
 // ---------------------------------------------------------------------------
 
-import { Router, type Request, type Response } from "express";
+import { Router, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import {
   S2C,
   areaAt,
   buildOfficeMap,
+  floorById,
+  type Floor,
   type SocialEventType,
   type ToastPayload,
 } from "@pixeloffice/shared";
 import { container } from "../container";
 import { isSocialEventType } from "../events/event.service";
-import { createAdminGuard } from "../auth/middleware";
+import { bearerToken, createAdminGuard, requireAuth, sessionOf } from "../auth/middleware";
 import { createLogger } from "../logging/logger";
 
 const log = createLogger("admin");
@@ -46,6 +48,7 @@ export function createAdminRouter(): Router {
     container.authConfig.jwt,
     container.authConfig.authRequired,
   );
+  const memberGuard = createMeetingGuard();
 
   // GET /api/health -------------------------------------------------------
   // Always open: container/load-balancer probes must never require a token.
@@ -60,8 +63,29 @@ export function createAdminRouter(): Router {
       res.json({ users: [] });
       return;
     }
+    // Resolve each player's area against THEIR OWN floor map — not a single
+    // hard-coded floor. A player at (24,19) on the ground floor and one at
+    // (24,19) on Floor 2 sit in different rooms; using one map for everyone
+    // mislabels every off-floor player and all ground-floor NPCs. The active
+    // building owns every floor's geometry (the room joined the same building).
+    const building = container.maps.getActiveBuilding();
+    // The default floor id the room uses when a snapshot omits floorId.
+    const defaultFloorId = building.floors[0]?.id ?? "ground";
+    const floorCache = new Map<string, Floor | null>();
+    const resolveFloor = (id: string): Floor | null => {
+      const cached = floorCache.get(id);
+      if (cached !== undefined) return cached;
+      const floor = floorById(building, id);
+      floorCache.set(id, floor);
+      return floor;
+    };
+
     const users = room.listPlayers().map((p) => {
-      const area = areaAt(map, p.x, p.y);
+      const floorId = p.floorId ?? defaultFloorId;
+      // A Floor IS an OfficeMap, so areaAt works on it directly. Fall back to
+      // the legacy single map only if the floor cannot be resolved.
+      const floor = resolveFloor(floorId);
+      const area = areaAt(floor ?? map, p.x, p.y);
       return {
         sessionId: p.sessionId,
         userId: p.userId,
@@ -73,6 +97,10 @@ export function createAdminRouter(): Router {
         presence: p.presence,
         source: p.source,
         area: area ? area.name : "Hallway",
+        // Per-player floor so an admin can disambiguate same-coordinate players
+        // on different floors. Additive fields (backward-compatible).
+        floorId,
+        floor: floor ? floor.name : floorId,
         // Surface ambient NPCs so admin tooling can distinguish them from real
         // users. Omitted (not false) for humans to keep the shape minimal and
         // backward-compatible.
@@ -125,15 +153,16 @@ export function createAdminRouter(): Router {
     res.status(202).json({ ok: true });
   });
 
-  // POST /api/meetings { title, startsInMinutes?, durationMinutes?, participantIds?, roomName? }
-  router.post("/meetings", guard, (req: Request, res: Response) => {
+  // POST /api/meetings { title, startTime?, startsInMinutes?, durationMinutes?, participantIds?, roomName? }
+  // Any signed-in member may schedule a meeting when AUTH_REQUIRED=true. In dev,
+  // this remains open and falls back to the in-memory mock calendar.
+  router.post("/meetings", memberGuard, async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const title = typeof body.title === "string" ? body.title.trim() : "";
     if (title.length === 0) {
       res.status(400).json({ error: "title is required" });
       return;
     }
-    const startsInMinutes = nonNegativeNumber(body.startsInMinutes, DEFAULT_MEETING_START);
     const durationMinutes = positiveNumber(body.durationMinutes, DEFAULT_MEETING_DURATION);
     const participantIds = Array.isArray(body.participantIds)
       ? body.participantIds.filter((id): id is string => typeof id === "string")
@@ -147,11 +176,64 @@ export function createAdminRouter(): Router {
       roomName = body.roomName;
     }
 
+    const now = Date.now();
+    const session = sessionOf(res);
+    const selectedRoom = roomName || undefined;
+    const startTime = parseMeetingStartTime(body.startTime, body.startsInMinutes, now);
+    if (startTime === null) {
+      res.status(400).json({ error: "startTime must be a valid future date/time" });
+      return;
+    }
+    const endTime = startTime + Math.round(durationMinutes * 60_000);
+    const startsInMinutes = Math.max(0, (startTime - now) / 60_000);
+    const roomEmail = selectedRoom ? googleRoomEmailFor(selectedRoom) : undefined;
+
+    if (session && container.googleCalendar) {
+      try {
+        const googleMeeting = await container.googleCalendar.createMeeting({
+          organizerUserId: session.sub,
+          title,
+          startTime,
+          endTime,
+          roomName: selectedRoom || "Meeting Room C",
+          attendeeEmails: await attendeeEmails(participantIds, session.sub, session.email),
+          roomEmail,
+        });
+        // Also seed the mock calendar so users without Google connected still
+        // get the in-office Join prompt. The real Google meeting overlays it for
+        // connected users via CompositeCalendarAdapter.
+        const shadow = container.mockCalendar.createMeeting(
+          { title, startsInMinutes, durationMinutes, participantIds, roomName },
+          now,
+        );
+        shadow.meetLink = googleMeeting.meetLink;
+        log.info("meeting scheduled", {
+          meetingId: googleMeeting.id,
+          title: googleMeeting.title,
+          room: googleMeeting.roomName,
+          startsInMinutes,
+          durationMinutes,
+          invitees: participantIds.length || "everyone",
+          source: "google",
+          roomBooked: Boolean(roomEmail),
+        });
+        res.status(201).json({
+          meeting: { ...googleMeeting, participantIds: [...participantIds] },
+          source: "google",
+        });
+        return;
+      } catch (err) {
+        log.warn("google meeting create failed; falling back to mock", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // Seeds the mock calendar; the presence tick (~3s) detects start/end and
     // emits MEETING_STARTED/ENDED — never auto-moves avatars (agency rule).
     const meeting = container.mockCalendar.createMeeting(
       { title, startsInMinutes, durationMinutes, participantIds, roomName },
-      Date.now(),
+      now,
     );
     log.info("meeting scheduled", {
       meetingId: meeting.id,
@@ -160,11 +242,70 @@ export function createAdminRouter(): Router {
       startsInMinutes,
       durationMinutes,
       invitees: participantIds.length || "everyone",
+      source: "mock",
     });
-    res.status(201).json({ meeting });
+    res.status(201).json({ meeting, source: "mock" });
   });
 
   return router;
+}
+
+function parseMeetingStartTime(
+  rawStartTime: unknown,
+  rawStartsInMinutes: unknown,
+  now: number,
+): number | null {
+  if (typeof rawStartTime === "number" || typeof rawStartTime === "string") {
+    const parsed =
+      typeof rawStartTime === "number" ? rawStartTime : Date.parse(rawStartTime);
+    if (!Number.isFinite(parsed) || parsed < now) return null;
+    return Math.round(parsed);
+  }
+  const startsInMinutes = nonNegativeNumber(rawStartsInMinutes, DEFAULT_MEETING_START);
+  return now + Math.round(startsInMinutes * 60_000);
+}
+
+function googleRoomEmailFor(roomName: string): string | undefined {
+  const raw = process.env.GOOGLE_MEETING_ROOM_EMAILS?.trim();
+  if (!raw) return undefined;
+  for (const entry of raw.split(",")) {
+    const [name, email] = entry.split("=");
+    if (name?.trim() === roomName && email?.trim()) return email.trim();
+  }
+  return undefined;
+}
+
+function createMeetingGuard(): RequestHandler {
+  if (container.authConfig.authRequired) return requireAuth(container.authConfig.jwt);
+  return (_req: Request, res: Response, next: NextFunction): void => {
+    const token = bearerToken(_req);
+    const session = token ? container.authConfig.jwt.tryVerify(token) : null;
+    if (session) res.locals.session = session;
+    next();
+  };
+}
+
+async function attendeeEmails(
+  participantIds: string[],
+  organizerUserId: string,
+  organizerEmail: string,
+): Promise<string[]> {
+  const out = new Set<string>();
+  const liveUserIds = new Set<string>();
+  for (const player of container.registry.room?.listPlayers() ?? []) {
+    if (!player.isNpc) liveUserIds.add(player.userId);
+  }
+
+  // Empty participantIds means "everyone" for in-office prompts. For Google
+  // Calendar, invite everyone currently online whose real email is known.
+  const targetIds = participantIds.length > 0 ? participantIds : [...liveUserIds];
+  for (const userId of targetIds) {
+    if (userId === organizerUserId) continue;
+    const stored = await container.users.findById(userId).catch(() => null);
+    const email = stored?.email;
+    if (email && email.toLowerCase() !== organizerEmail.toLowerCase()) out.add(email);
+  }
+  return [...out];
 }
 
 function positiveNumber(value: unknown, fallback: number): number {

@@ -30,6 +30,7 @@ import {
   GreytHrAuthError,
   type GreytHrAuthService,
 } from "../auth/greythr/greythr-auth.service";
+import { createLogger } from "../logging/logger";
 
 /**
  * Optional Google Calendar connect deps. Present ONLY when GOOGLE_CLIENT_ID +
@@ -102,7 +103,12 @@ function avatarForSubject(subject: string): AvatarId {
   return AVATAR_IDS[hash % AVATAR_IDS.length];
 }
 
-const CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly";
+const CAL_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events.readonly",
+  "https://www.googleapis.com/auth/calendar.events.owned",
+] as const;
+
+const log = createLogger("http:auth");
 
 export function createAuthRouter(deps: AuthRouterDeps): Router {
   const router = Router();
@@ -279,10 +285,82 @@ function mountGreytHrLoginRoutes(
       res.json({ token, profile });
     } catch (err) {
       if (err instanceof GreytHrAuthError) {
+        log.warn("greytHR login failed", {
+          status: err.status,
+          message: err.message,
+          subdomain: subdomain ?? "",
+          loginIdLength: loginId.length,
+        });
         res.status(err.status).json({ error: err.message });
         return;
       }
+      log.warn("greytHR login failed unexpectedly", {
+        error: err instanceof Error ? err.name : typeof err,
+      });
       res.status(502).json({ error: "greytHR sign-in failed" });
+    }
+  });
+
+  // POST /greythr/reconnect: the user is ALREADY in the office (valid PixelOffice
+  // JWT) but the underlying greytHR ESS session has expired (greytHR's own
+  // absolute TTL) or was dropped (server restart wipes the in-memory store).
+  // This re-authenticates ONLY the greytHR session and repopulates the shared
+  // session store the attendance adapter reads — WITHOUT minting a new office
+  // JWT or tearing down the office session. The user stays seated; they re-enter
+  // only their greytHR password (the Employee No is taken from their JWT sub, so
+  // it is never guessed or client-asserted). This stays Constitution-compliant:
+  // identity is server-derived and the action is explicit (user types the
+  // password); PixelOffice still stores no password — only the minted JWT and
+  // the opaque greytHR session.
+  router.post("/greythr/reconnect", async (req: Request, res: Response) => {
+    const token = bearerToken(req);
+    const session = token ? config.jwt.tryVerify(token) : null;
+    if (!session?.sub) {
+      res.status(401).json({ error: "Sign in again to reconnect greytHR." });
+      return;
+    }
+    // Only greytHR identities (sub === "greythr:<employeeNo>") can reconnect; the
+    // Employee No to log in with is derived from the verified token, never the
+    // request body, so a user can only ever reconnect their OWN account.
+    const prefix = "greythr:";
+    if (!session.sub.startsWith(prefix)) {
+      res.status(400).json({ error: "This account does not use greytHR sign-in." });
+      return;
+    }
+    const employeeNo = session.sub.slice(prefix.length);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!password) {
+      res.status(400).json({ error: "password is required" });
+      return;
+    }
+    const subdomain =
+      typeof body.subdomain === "string" && body.subdomain.trim()
+        ? body.subdomain.trim()
+        : deps.subdomain || undefined;
+
+    try {
+      const { profile } = await deps.service.loginWithCredentials({
+        subdomain,
+        loginId: employeeNo,
+        password,
+      });
+      // Defense in depth: the freshly authenticated greytHR account MUST resolve
+      // to the same office identity. If it does not (credentials for a different
+      // employee), drop that just-created session and refuse — never link
+      // another account's session to this office identity.
+      if (profile.userId !== session.sub) {
+        await deps.service.logout(profile.userId);
+        res.status(403).json({ error: "Those credentials belong to a different greytHR account." });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof GreytHrAuthError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      res.status(502).json({ error: "greytHR reconnect failed" });
     }
   });
 
@@ -340,7 +418,7 @@ function mountGoogleCalendarRoutes(
       client_id: gc.clientId,
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: CAL_SCOPE,
+      scope: CAL_SCOPES.join(" "),
       state,
       access_type: "offline",
       prompt: "consent",

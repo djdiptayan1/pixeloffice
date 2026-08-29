@@ -12,7 +12,8 @@
 //
 // Everything env-driven is OPT-IN. With NO env vars set the container resolves
 // to the exact zero-config MVP behavior: dev auth, in-memory user repo,
-// in-memory presence store, mock calendar, mock GreytHR. Real auth providers /
+// in-memory presence store, mock calendar, and NO HR backend (the attendance
+// routes are only mounted when greytHR is configured). Real auth providers /
 // JWT / Postgres / Redis / GreytHR activate only when their env config is
 // present, and a configured-but-unreachable datastore degrades to in-memory
 // instead of crashing (plan Principle 4: integrations are optional).
@@ -31,9 +32,11 @@ import { GoogleCalendarAdapter } from "./integrations/calendar/google-calendar.a
 import { CompositeCalendarAdapter } from "./integrations/calendar/composite-calendar.adapter";
 import {
   InMemoryGoogleTokenStore,
+  RedisGoogleTokenStore,
   type GoogleTokenStore,
 } from "./auth/google-token.store";
 import { EventService } from "./events/event.service";
+import { WhiteboardService } from "./whiteboard/whiteboard.service";
 import { PresenceService } from "./presence/presence.service";
 import type { HrAdapter } from "./integrations/hr/hr-adapter";
 import { GreytHrEssAttendanceAdapter } from "./integrations/hr/greythr-ess-attendance.adapter";
@@ -62,6 +65,11 @@ import {
   createFloorLocationAdapter,
   type FloorLocationAdapter,
 } from "./location/floor-location.adapter";
+import {
+  createSsidFloorResolver,
+  type SsidFloorResolver,
+} from "./location/ssid-floor";
+import { PairCodeStore } from "./location/pair-code.store";
 import type { OfficeRoom } from "./rooms/office.room";
 
 // --- Synchronous, framework-free services (shared by REST + room) ----------
@@ -79,7 +87,13 @@ const googleCalConfigured =
   Boolean(process.env.GOOGLE_CLIENT_ID?.trim()) &&
   Boolean(process.env.GOOGLE_CLIENT_SECRET?.trim());
 
-const googleTokenStore: GoogleTokenStore = new InMemoryGoogleTokenStore();
+let activeGoogleTokenStore: GoogleTokenStore = new InMemoryGoogleTokenStore();
+const googleTokenStore: GoogleTokenStore = {
+  save: (userId, record) => activeGoogleTokenStore.save(userId, record),
+  get: (userId) => activeGoogleTokenStore.get(userId),
+  delete: (userId) => activeGoogleTokenStore.delete(userId),
+  connectedUserIds: () => activeGoogleTokenStore.connectedUserIds(),
+};
 
 const googleCalendar: GoogleCalendarAdapter | null = googleCalConfigured
   ? new GoogleCalendarAdapter(
@@ -101,6 +115,8 @@ const calendar: CalendarAdapter = googleCalendar
   : mockCalendar;
 const events = new EventService();
 const presence = new PresenceService(calendar, events);
+// Per-department collaborative whiteboards (in-memory; cleared on restart).
+const whiteboard = new WhiteboardService();
 
 // --- Multi-floor building / map repository ---------------------------------
 // Source of the ACTIVE building (a stack of floors). The room reads the active
@@ -114,6 +130,25 @@ const maps: MapRepository = new InMemoryMapRepository();
 // inert) so the zero-config dev path is untouched. PRIVACY: the adapter never
 // logs/persists the IP and never keeps a location history (plan Principle 2).
 const floorLocation: FloorLocationAdapter = createFloorLocationAdapter();
+
+// --- OPT-IN SSID -> floor resolver (companion floor reports) ----------------
+// Maps a reported WiFi SSID to a floor id (SSID_FLOOR_MAP; defaults to the
+// KALVIUM office map, so it is effectively always available). Validated against
+// the active building's floor ids. A report only APPLIES to opted-in users (the
+// room enforces the SET_LOCATION_SYNC gate). PRIVACY: the SSID is never logged
+// or persisted — it is resolved to a floor id and discarded.
+const ssidFloor: SsidFloorResolver = createSsidFloorResolver(
+  process.env,
+  maps.getActiveBuilding().floors.map((f) => f.id),
+);
+
+// --- Floor-sync PAIRING CODE store (companion <-> session, IP-independent) --
+// Minted when a user enables floor sync; the user pastes it into the companion
+// (FLOOR_SYNC_PAIR_CODE) so a floor report resolves to THAT session regardless
+// of IP (fixes NAT / Docker / localhost multi-tab collisions). PRIVACY: a code
+// maps ONLY to {sessionId,userId} in memory with a TTL; never logged/persisted,
+// invalidated on disable/leave. A resolved code is still opt-in gated downstream.
+const pairCodes = new PairCodeStore();
 
 // --- Ambient NPCs (so the office never feels empty) ------------------------
 // Framework-free behavior engine. Owns a seeded PRNG (NPC_SEED, default 42) so
@@ -214,6 +249,8 @@ export const container = {
   googleCalConfigured,
   events,
   presence,
+  /** Per-department collaborative whiteboards (in-memory stroke store). */
+  whiteboard,
   /** Ambient office NPCs (framework-free; the room wires effects to the wire). */
   npcs,
   /** Active building + saved maps (the room reads the active building at create). */
@@ -224,6 +261,21 @@ export const container = {
    * Never logs/persists the IP (plan Principle 2).
    */
   floorLocation,
+  /**
+   * OPT-IN SSID -> floor resolver (companion floor reports). Maps a reported
+   * WiFi SSID to a floor id via SSID_FLOOR_MAP (defaults to the KALVIUM map, so
+   * effectively always available). A report only APPLIES to opted-in users.
+   * Never logs/persists the SSID (AGENTS.md Principle 1).
+   */
+  ssidFloor,
+  /**
+   * Floor-sync PAIRING CODE store. Minted on SET_LOCATION_SYNC{enabled:true} and
+   * sent to that client (S2C.FLOOR_SYNC_CODE); the companion echoes it back as
+   * body.pairCode so POST /api/location/floor-report resolves to the exact
+   * session regardless of IP. PRIVACY: in-memory {sessionId,userId}+TTL only;
+   * never logged/persisted; invalidated on disable/leave (AGENTS.md Principle 1).
+   */
+  pairCodes,
   auth,
   /** Auth config (providers map, jwt service, RBAC, AUTH_REQUIRED gate). */
   authConfig,
@@ -231,7 +283,11 @@ export const container = {
   greytHrAuth: greytHrAuthService,
   /** greytHR login config (null when disabled); carries the form subdomain. */
   greytHrLoginConfig,
-  /** HR adapter + attendance service (mock unless GreytHR env is set). */
+  /**
+   * HR adapter + attendance service (greytHR ESS). NOTE: there is no mock HR
+   * adapter — the /api/hr routes are mounted only when `hrConfigured` is true
+   * (GREYTHR_LOGIN_ENABLED). In zero-config dev HR is simply absent.
+   */
   hr,
   attendance,
   /** greytHR ESS portal deep link, or undefined when not configured. */
@@ -273,10 +329,6 @@ export async function initContainer(
   if (initialized) return;
   initialized = true;
 
-  // Start the Google Calendar background poll loop (no-op when unconfigured).
-  // The adapter owns its own interval; the room tick stays untouched.
-  googleCalendar?.start();
-
   const userResult = await createUserRepository(env);
   users = userResult.repository;
   database = userResult.database;
@@ -284,4 +336,15 @@ export async function initContainer(
   const presenceStoreResult = await createPresenceStore(env);
   presenceStore = presenceStoreResult.store;
   redis = presenceStoreResult.redis;
+
+  if (redis) {
+    activeGoogleTokenStore = new RedisGoogleTokenStore(
+      redis,
+      env.GOOGLE_TOKEN_ENC_KEY ?? env.JWT_SECRET,
+    );
+  }
+
+  // Start the Google Calendar background poll loop after persistence is selected
+  // so connected grants survive restarts when Redis is configured.
+  googleCalendar?.start();
 }

@@ -125,6 +125,14 @@ export interface HudCallbacks {
   onJoinGame?(gameId: string, mode: "ai" | "group"): void;
   onLocate?(sessionId: string): void;
   onOpenProfile?(sessionId: string): void;
+  /**
+   * Open the editor for the LOCAL user's own profile (name / department /
+   * avatar). Surfaced as an explicit, discoverable affordance in the status
+   * menu so editing your identity does not depend on the (easy-to-miss)
+   * double-click-your-own-avatar gesture. Same handler the scene's double-click
+   * calls. No-op / item hidden if the integrator does not wire it.
+   */
+  onEditSelfProfile?(): void;
   isNpcHidden?(): boolean;
   /**
    * Optional: pan the CAMERA toward the nearest elevator/portal on the current
@@ -248,6 +256,23 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     statusMenu.appendChild(item);
   }
   statusMenu.appendChild(statusNote);
+  // "Edit profile" entry — a discoverable path to the profile editor (the
+  // double-click-your-own-avatar gesture is easy to miss). Only added when the
+  // integrator wires the handler. Visually separated from the status options.
+  if (cb.onEditSelfProfile) {
+    const divider = document.createElement("div");
+    divider.className = "hud-status-divider";
+    statusMenu.appendChild(divider);
+    const editItem = document.createElement("button");
+    editItem.type = "button";
+    editItem.className = "hud-status-item hud-status-edit";
+    editItem.append(document.createTextNode("✎ Edit profile"));
+    editItem.addEventListener("click", () => {
+      statusMenu.hidden = true;
+      cb.onEditSelfProfile?.();
+    });
+    statusMenu.appendChild(editItem);
+  }
   statusPill.addEventListener("click", () => {
     statusMenu.hidden = !statusMenu.hidden;
   });
@@ -310,6 +335,26 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
 
   sidebar.append(rosterPanel, meetingsPanel, eventsPanel);
 
+  // --- Narrow-viewport sidebar drawer toggle -------------------------------
+  // On phone/narrow widths the fixed 264px sidebar would cover the canvas, the
+  // top-left controls and the chat bar. There, CSS turns the sidebar into an
+  // off-canvas drawer that defaults to collapsed; this FAB (shown only at narrow
+  // widths via CSS) slides it in/out so the play area + chat stay usable. The
+  // button is harmless/hidden on desktop. No business logic — pure UI affordance.
+  const sidebarToggle = document.createElement("button");
+  sidebarToggle.type = "button";
+  sidebarToggle.className = "hud-sidebar-toggle";
+  sidebarToggle.setAttribute("aria-controls", "hud-sidebar");
+  sidebarToggle.setAttribute("aria-expanded", "false");
+  sidebarToggle.setAttribute("aria-label", "Toggle team & events panel");
+  sidebarToggle.textContent = "👥";
+  sidebar.id = "hud-sidebar";
+  sidebar.classList.add("collapsed");
+  sidebarToggle.addEventListener("click", () => {
+    const open = sidebar.classList.toggle("collapsed") === false;
+    sidebarToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
   // --- Bottom-left chat ----------------------------------------------------
   const chatBar = document.createElement("div");
   chatBar.className = "hud-chat";
@@ -336,7 +381,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
   chatInput.addEventListener("blur", () => cb.onChatFocus?.(false));
   chatBar.appendChild(chatInput);
 
-  layer.append(topBar, sidebar, chatBar);
+  layer.append(topBar, sidebar, sidebarToggle, chatBar);
 
   // --- Rendering helpers ---------------------------------------------------
 
@@ -760,14 +805,32 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     renderRoster(state);
     renderEvents(state);
 
+    renderInteractPrompt(state);
+
+    renderGameOverlay(state);
+  }
+
+  function renderInteractPrompt(state: UiState): void {
+    promptEl.innerHTML = "";
     if (state.interactPrompt) {
       promptEl.textContent = state.interactPrompt;
       promptEl.style.display = "block";
-    } else {
-      promptEl.style.display = "none";
+      return;
     }
-
-    renderGameOverlay(state);
+    const meeting = state.myMeeting;
+    const meetLink = (meeting as { meetLink?: string } | null)?.meetLink;
+    if (meeting && meetLink && state.selfArea === meeting.roomName) {
+      const anchor = document.createElement("a");
+      anchor.className = "hud-room-meet-link";
+      anchor.href = meetLink;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = "Open Meet";
+      promptEl.append(anchor);
+      promptEl.style.display = "block";
+      return;
+    }
+    promptEl.style.display = "none";
   }
 
   // Re-render once per second so event "time left" countdowns tick down.

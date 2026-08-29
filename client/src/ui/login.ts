@@ -388,6 +388,11 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   gtIdInput.type = "text";
   gtIdInput.autocomplete = "username";
   gtIdInput.placeholder = "e.g. KCC00000";
+  try {
+    gtIdInput.value = localStorage.getItem("pixeloffice.greythr.loginId") ?? "";
+  } catch {
+    gtIdInput.value = "";
+  }
   gtIdLabel.appendChild(gtIdInput);
 
   const gtPwLabel = document.createElement("label");
@@ -397,6 +402,11 @@ export function createLogin(opts: LoginOptions): LoginHandle {
   gtPwInput.className = "login-input";
   gtPwInput.type = "password";
   gtPwInput.autocomplete = "current-password";
+  try {
+    gtPwInput.value = localStorage.getItem("pixeloffice.greythr.password") ?? "";
+  } catch {
+    gtPwInput.value = "";
+  }
   gtPwLabel.appendChild(gtPwInput);
 
   const gtError = document.createElement("div");
@@ -440,6 +450,12 @@ export function createLogin(opts: LoginOptions): LoginHandle {
         gtError.textContent = result.error;
         setGreytHrBusy(false);
         return;
+      }
+      try {
+        localStorage.setItem("pixeloffice.greythr.loginId", loginId);
+        localStorage.setItem("pixeloffice.greythr.password", password);
+      } catch {
+        /* best-effort */
       }
       storeToken(result.token);
       const department: Department = (DEPARTMENTS as readonly string[]).includes(
@@ -493,17 +509,20 @@ export function createLogin(opts: LoginOptions): LoginHandle {
     const hasGreytHr = !!(config && config.greythr && config.greythr.enabled);
 
     if (hasGreytHr) {
-      // greytHR is the sole sign-in: show only the avatar picker + Employee No /
-      // Password; the avatar sits above the Sign in button.
+      // greytHR is the only office sign-in because attendance and HR services
+      // are bound to that identity. Google/Microsoft OAuth is used inside the
+      // office for optional Workspace/calendar sync, not for entering.
       greytHrSubdomain = config!.greythr!.subdomain ?? "";
       greytHrArea.insertBefore(avatarBlock, gtSubmit);
       greytHrArea.hidden = false;
       activeErrorLine = gtError;
-      footer.textContent = "Sign in with your greytHR account";
-      // Remove the guest form + divider (.login-form's display:flex overrides
-      // [hidden], so .hidden alone won't hide it).
-      form.remove();
+      footer.textContent = hasOAuth
+        ? "Google Workspace sync is available inside the office."
+        : "Sign in with your greytHR account";
       divider.remove();
+      // Remove the guest form (.login-form's display:flex overrides [hidden],
+      // so .hidden alone won't hide it).
+      form.remove();
       gtIdInput.focus();
       return;
     }

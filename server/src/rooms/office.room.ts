@@ -23,6 +23,8 @@ import {
   S2C,
   AVATAR_IDS,
   DEPARTMENTS,
+  MAIN_OFFICE_FLOOR_ID,
+  SPAWN_FLOOR_ID,
   anchorFor,
   isWalkable,
   portalAt,
@@ -55,6 +57,22 @@ import {
   type SetStatusPayload,
   type SetLocationSyncPayload,
   type LocationPayload,
+  type FloorSyncCodePayload,
+  type RtcCallC2S,
+  type RtcCallS2C,
+  type RtcSignalC2S,
+  type RtcSignalS2C,
+  type RtcCallAction,
+  type WhiteboardOpenC2S,
+  type WhiteboardCloseC2S,
+  type WhiteboardUpdateC2S,
+  type WhiteboardClearC2S,
+  type WhiteboardStateS2C,
+  type WhiteboardUpdateS2C,
+  type WhiteboardClearS2C,
+  type WhiteboardElement,
+  chebyshev,
+  CALL_REQUEST_TILES,
   type SocialEvent,
   type ToastPayload,
   type WelcomePayload,
@@ -74,7 +92,11 @@ import {
   resolveShot,
   pickShot,
   makePrng,
+  joinPool,
+  leavePool,
+  rematchPool,
   type PoolDifficulty,
+  type PoolLifecycleResult,
 } from "../games/pool";
 import { container } from "../container";
 import { createLogger } from "../logging/logger";
@@ -102,6 +124,26 @@ const CHAT_RATE = 5; // messages/sec
 const CHAT_WINDOW_MS = 1000;
 const ACTION_RATE = 10; // status/join/leave actions per window
 const ACTION_WINDOW_MS = 1000;
+// WebRTC signaling (SDP/ICE) is bursty during negotiation — ICE alone can emit
+// dozens of candidates in under a second. A generous bucket keeps the relay
+// flowing while still capping a flood. Call CONTROL reuses the action bucket.
+const RTC_SIGNAL_RATE = 80;
+const RTC_SIGNAL_WINDOW_MS = 1000;
+const RTC_CALL_ACTIONS = new Set<RtcCallAction>([
+  "request",
+  "accept",
+  "reject",
+  "cancel",
+  "hangup",
+]);
+// Whiteboard: throttled element-batch updates, plus open/close/clear. Updates
+// are debounced client-side (~one batch per change burst), so a modest rate is
+// plenty while still bounding abuse.
+const WB_RATE = 30;
+const WB_WINDOW_MS = 1000;
+const WB_MAX_ELEMENTS_PER_MSG = 2000; // cap a single update batch
+const WB_MAX_ELEMENT_BYTES = 131072; // 128KB — fits long freedraw strokes (points + pressures)
+const WB_DEPARTMENTS = new Set<string>(DEPARTMENTS);
 
 // Same trust-proxy decision the REST rate limiter uses (index.ts). Only when the
 // server sits behind a vetted reverse proxy is X-Forwarded-For honored for the
@@ -123,9 +165,30 @@ export class OfficeRoom extends Room {
   private readonly floors = new Map<string, Floor>(
     this.building.floors.map((f) => [f.id, f]),
   );
-  /** The ground floor id — default spawn floor + the legacy single-floor target. */
+  /**
+   * The ground floor id (index 0). The DEFAULT floor for an absent snapshot
+   * floorId (contract: absent => "ground"), for admin-REST events without a
+   * floor, and the target of floor-scoped fallbacks. NOTE: this is NOT where new
+   * players spawn — that is `spawnFloorId` (the rich main office, now Floor 2).
+   */
   private readonly groundFloorId: string =
     (this.building.floors.find((f) => f.index === 0) ?? this.building.floors[0]).id;
+  /**
+   * The floor a NEW player spawns on (the rich main office — Floor 2 in the
+   * default building, exported as SPAWN_FLOOR_ID). Falls back to the ground floor
+   * for custom buildings that lack that floor id.
+   */
+  private readonly spawnFloorId: string = this.floors.has(SPAWN_FLOOR_ID)
+    ? SPAWN_FLOOR_ID
+    : this.groundFloorId;
+  /**
+   * The floor whose geometry is exactly buildOfficeMap() (the rich main office),
+   * which reuses the SHARED container NPC engine (built on buildOfficeMap). Falls
+   * back to the ground floor for custom buildings lacking that floor id.
+   */
+  private readonly mainOfficeFloorId: string = this.floors.has(MAIN_OFFICE_FLOOR_ID)
+    ? MAIN_OFFICE_FLOOR_ID
+    : this.groundFloorId;
   /** Per-floor ambient NPC engines (each seeded from that floor's geometry). */
   private readonly npcByFloor = new Map<string, NpcService>();
   /** Reverse index: NPC sessionId -> floorId (NPCs never change floors). */
@@ -174,6 +237,12 @@ export class OfficeRoom extends Room {
   private readonly moveBuckets = new Map<string, TokenBucket>();
   private readonly chatBuckets = new Map<string, TokenBucket>();
   private readonly actionBuckets = new Map<string, TokenBucket>();
+  /** Per-session WebRTC signaling bucket (bursty ICE; created on join). */
+  private readonly rtcBuckets = new Map<string, TokenBucket>();
+  /** Per-session whiteboard-stroke bucket (created on join). */
+  private readonly wbBuckets = new Map<string, TokenBucket>();
+  /** board (department) -> sessionIds currently viewing it (broadcast targets). */
+  private readonly wbSubs = new Map<string, Set<string>>();
 
   /** Active multiplayer games in the lounge. */
   private readonly games = new Map<string, ActiveGame>();
@@ -269,22 +338,22 @@ export class OfficeRoom extends Room {
     // They are server-driven ambience: never join meetings, never touch HR,
     // never respond to humans, and never change floors.
     //
-    // The ground floor reuses the SHARED container NPC engine (built on the
-    // legacy ground geometry) so its existing behavior/tests are unchanged.
-    // Upper floors get fresh per-floor engines (distinct sessionIds via a
-    // floor-id prefix so they never collide across floors).
+    // The MAIN OFFICE floor (the rich buildOfficeMap layout) reuses the SHARED
+    // container NPC engine (built on that exact geometry) so its existing
+    // behavior/tests are unchanged. Other floors get fresh per-floor engines
+    // (distinct sessionIds via a floor-id prefix so they never collide).
     const npcCfg = npcConfigFromEnv(process.env);
     const now0 = Date.now();
     for (const floor of this.building.floors) {
       let engine: NpcService;
-      if (floor.id === this.groundFloorId) {
-        engine = container.npcs; // shared engine = legacy ground behavior
+      if (floor.id === this.mainOfficeFloorId) {
+        engine = container.npcs; // shared engine = legacy rich-office behavior
       } else {
         engine = new NpcService(floor, mulberry32(npcCfg.seed + floor.index), npcCfg.count);
       }
       this.npcByFloor.set(floor.id, engine);
       for (const snap of engine.spawnAll(now0)) {
-        const id = floor.id === this.groundFloorId ? snap.sessionId : `${floor.id}:${snap.sessionId}`;
+        const id = floor.id === this.mainOfficeFloorId ? snap.sessionId : `${floor.id}:${snap.sessionId}`;
         const placed: PlayerSnapshot = { ...snap, sessionId: id, floorId: floor.id };
         this.players.set(id, placed);
         this.npcFloor.set(id, floor.id);
@@ -296,6 +365,8 @@ export class OfficeRoom extends Room {
       const now = Date.now();
       container.presence.tick(now);
       container.events.tick(now);
+      // Sweep expired pairing codes (privacy: nothing stale lingers in memory).
+      container.pairCodes.prune(now);
       // Advance ambient NPCs PER FLOOR and translate their effects to wire
       // messages (floor-scoped). The NPC service is framework-free; the room is
       // the only Colyseus seam. Events are floor-scoped, so each floor's NPCs
@@ -313,11 +384,11 @@ export class OfficeRoom extends Room {
    * every connected human should see them move/change presence/chat.
    */
   private applyNpcEffects(effects: NpcEffect[], floorId: string): void {
-    // The ground floor uses the shared engine whose sessionIds are stored as-is;
-    // upper floors prefix the engine sessionId with "<floorId>:". Resolve the
-    // authoritative key the same way it was inserted in onCreate.
+    // The main office floor uses the shared engine whose sessionIds are stored
+    // as-is; other floors prefix the engine sessionId with "<floorId>:". Resolve
+    // the authoritative key the same way it was inserted in onCreate.
     const keyFor = (engineSessionId: string): string =>
-      floorId === this.groundFloorId ? engineSessionId : `${floorId}:${engineSessionId}`;
+      floorId === this.mainOfficeFloorId ? engineSessionId : `${floorId}:${engineSessionId}`;
 
     for (const effect of effects) {
       const sessionId = keyFor(effect.sessionId);
@@ -420,9 +491,11 @@ export class OfficeRoom extends Room {
 
     this.onEventCreated = (event: SocialEvent) => {
       // Events are per-floor. Admin REST creates them without a floor, so they
-      // belong to the ground floor (legacy single-floor behavior). The event's
-      // areaName must match an area on that floor's map for anchors to resolve.
-      const floorId = this.eventFloor.get(event.id) ?? this.groundFloorId;
+      // belong to the MAIN OFFICE floor (the rich layout that owns Coffee Area /
+      // Lounge / Meeting Rooms) — preserving the legacy single-floor behavior now
+      // that the rich office is Floor 2. The event's areaName must match an area
+      // on that floor's map for anchors to resolve.
+      const floorId = this.eventFloor.get(event.id) ?? this.mainOfficeFloorId;
       this.eventFloor.set(event.id, floorId);
       log.info("social event created", { type: event.type, title: event.title, area: event.areaName, floorId });
       this.broadcastToFloor(floorId, S2C.EVENT_CREATED, { event });
@@ -435,13 +508,13 @@ export class OfficeRoom extends Room {
     events.on("created", this.onEventCreated);
 
     this.onEventUpdated = (event: SocialEvent) => {
-      const floorId = this.eventFloor.get(event.id) ?? this.groundFloorId;
+      const floorId = this.eventFloor.get(event.id) ?? this.mainOfficeFloorId;
       this.broadcastToFloor(floorId, S2C.EVENT_UPDATED, { event });
     };
     events.on("updated", this.onEventUpdated);
 
     this.onEventEnded = (eventId: string) => {
-      const floorId = this.eventFloor.get(eventId) ?? this.groundFloorId;
+      const floorId = this.eventFloor.get(eventId) ?? this.mainOfficeFloorId;
       this.eventFloor.delete(eventId);
       this.broadcastToFloor(floorId, S2C.EVENT_ENDED, { eventId });
       // Presence recomputes on the next tick once participants are gone; force
@@ -481,11 +554,13 @@ export class OfficeRoom extends Room {
       name: identity.name,
       department: identity.department,
       avatarId: identity.avatarId,
+      ...(identity.email ? { email: identity.email } : {}),
     });
 
-    // New joiners always spawn on the ground floor at a free desk seat (as today).
-    const groundFloor = this.floors.get(this.groundFloorId)!;
-    const seat = this.assignSpawn(groundFloor, identity.department);
+    // New joiners spawn on the rich MAIN OFFICE floor (Floor 2) at a free desk
+    // seat, so the default experience lands in the full office at a real desk.
+    const spawnFloor = this.floors.get(this.spawnFloorId)!;
+    const seat = this.assignSpawn(spawnFloor, identity.department);
     this.homeSeat.set(client.sessionId, seat);
     this.sessionUser.set(client.sessionId, identity.userId);
     // Floor sync is OPT-IN and OFF by default. `place` stays absent on the
@@ -497,6 +572,8 @@ export class OfficeRoom extends Room {
     this.moveBuckets.set(client.sessionId, new TokenBucket(MOVE_RATE, MOVE_WINDOW_MS, now));
     this.chatBuckets.set(client.sessionId, new TokenBucket(CHAT_RATE, CHAT_WINDOW_MS, now));
     this.actionBuckets.set(client.sessionId, new TokenBucket(ACTION_RATE, ACTION_WINDOW_MS, now));
+    this.rtcBuckets.set(client.sessionId, new TokenBucket(RTC_SIGNAL_RATE, RTC_SIGNAL_WINDOW_MS, now));
+    this.wbBuckets.set(client.sessionId, new TokenBucket(WB_RATE, WB_WINDOW_MS, now));
 
     const snapshot: PlayerSnapshot = {
       sessionId: client.sessionId,
@@ -509,7 +586,7 @@ export class OfficeRoom extends Room {
       dir: "down",
       presence: PresenceState.AVAILABLE, // resolved immediately below
       source: "SYSTEM",
-      floorId: this.groundFloorId,
+      floorId: this.spawnFloorId,
     };
 
     // Insert the snapshot BEFORE the immediate tick: the tick fires the shared
@@ -540,9 +617,9 @@ export class OfficeRoom extends Room {
 
     const welcome: WelcomePayload = {
       self: { ...snapshot },
-      // Floor-scoped: only co-located players (the joiner spawns on ground).
-      players: this.othersOnFloor(client.sessionId, this.groundFloorId),
-      events: this.activeEventsOnFloor(this.groundFloorId, now),
+      // Floor-scoped: only co-located players (the joiner spawns on the main office).
+      players: this.othersOnFloor(client.sessionId, this.spawnFloorId),
+      events: this.activeEventsOnFloor(this.spawnFloorId, now),
       meeting: currentMeeting,
       building: this.buildingSummary(),
     };
@@ -561,7 +638,7 @@ export class OfficeRoom extends Room {
 
     // Tell everyone ELSE ON THIS FLOOR the player joined (carries presence).
     const joined: PlayerJoinedPayload = { player: { ...snapshot } };
-    this.broadcastToFloorExcept(client, this.groundFloorId, S2C.PLAYER_JOINED, joined);
+    this.broadcastToFloorExcept(client, this.spawnFloorId, S2C.PLAYER_JOINED, joined);
 
     // Join complete: subsequent presence changes for this session broadcast.
     this.joining.delete(client.sessionId);
@@ -595,11 +672,20 @@ export class OfficeRoom extends Room {
     // the session — it was never logged or persisted in the first place).
     this.sessionIp.delete(sessionId);
     this.locationSync.delete(sessionId);
+    // Invalidate any companion pairing code so it cannot resolve to a gone
+    // session (privacy: the transient code -> {sessionId,userId} entry is
+    // dropped the moment the session leaves).
+    container.pairCodes.invalidateSession(sessionId);
     this.homeSeat.delete(sessionId);
     this.meetingSlots.releaseEverywhere(sessionId);
     this.moveBuckets.delete(sessionId);
     this.chatBuckets.delete(sessionId);
     this.actionBuckets.delete(sessionId);
+    this.rtcBuckets.delete(sessionId);
+    this.wbBuckets.delete(sessionId);
+    // Drop this session from every whiteboard it was viewing (no broadcast
+    // needed — viewers are not shown a live presence list of the board).
+    for (const subs of this.wbSubs.values()) subs.delete(sessionId);
     this.joining.delete(sessionId);
 
     const left: PlayerLeftPayload = { sessionId };
@@ -651,6 +737,22 @@ export class OfficeRoom extends Room {
     );
     this.onMessage(C2S.SET_LOCATION_SYNC, (client, payload: SetLocationSyncPayload) =>
       this.handleSetLocationSync(client, payload),
+    );
+    this.onMessage(C2S.RTC_CALL, (client, payload: RtcCallC2S) => this.handleRtcCall(client, payload));
+    this.onMessage(C2S.RTC_SIGNAL, (client, payload: RtcSignalC2S) =>
+      this.handleRtcSignal(client, payload),
+    );
+    this.onMessage(C2S.WHITEBOARD_OPEN, (client, payload: WhiteboardOpenC2S) =>
+      this.handleWhiteboardOpen(client, payload),
+    );
+    this.onMessage(C2S.WHITEBOARD_CLOSE, (client, payload: WhiteboardCloseC2S) =>
+      this.handleWhiteboardClose(client, payload),
+    );
+    this.onMessage(C2S.WHITEBOARD_UPDATE, (client, payload: WhiteboardUpdateC2S) =>
+      this.handleWhiteboardUpdate(client, payload),
+    );
+    this.onMessage(C2S.WHITEBOARD_CLEAR, (client, payload: WhiteboardClearC2S) =>
+      this.handleWhiteboardClear(client, payload),
     );
     this.onMessage(C2S.JOIN_GAME, (client, payload: any) => this.handleJoinGame(client, payload));
     this.onMessage(C2S.LEAVE_GAME, (client, payload: any) => this.handleLeaveGame(client, payload));
@@ -715,7 +817,12 @@ export class OfficeRoom extends Room {
       // see the avatar reach the portal tile, then perform the crossing.
       const moved: PlayerMovedPayload = { sessionId: client.sessionId, x, y, dir, moving: false };
       this.broadcastToFloorExcept(client, floorId, S2C.PLAYER_MOVED, moved);
-      this.changeFloor(client, snap, floorId, portal.toFloorId, portal.toX, portal.toY, dir);
+      // Resolve a FREE landing tile near the portal target so concurrent riders
+      // do not stack on the identical arrival tile (occupancy-aware, scoped to
+      // the destination floor — mirrors assignSpawn / the consented-move path).
+      const dest = this.floors.get(portal.toFloorId)!;
+      const land = this.freeTileNear(dest, portal.toX, portal.toY);
+      this.changeFloor(client, snap, floorId, portal.toFloorId, land.x, land.y, dir);
       return;
     }
 
@@ -867,8 +974,10 @@ export class OfficeRoom extends Room {
 
     if (!payload.enabled) {
       // Turn sync OFF: clear the tag, tell co-located clients to drop the badge.
-      // Never moves the avatar.
+      // Never moves the avatar. Invalidate any pairing code (privacy: the
+      // code -> {sessionId,userId} entry must not outlive the opt-in).
       this.locationSync.set(client.sessionId, false);
+      container.pairCodes.invalidateSession(client.sessionId);
       if (snap.place === undefined) return; // already off — nothing to broadcast
       snap.place = undefined;
       const cleared: LocationPayload = {
@@ -882,6 +991,20 @@ export class OfficeRoom extends Room {
 
     // Turn sync ON: classify the transient IP (never logged/persisted).
     this.locationSync.set(client.sessionId, true);
+
+    // Mint (or refresh) this session's companion PAIRING CODE and hand it to
+    // THIS client only. The user pastes it into the companion
+    // (FLOOR_SYNC_PAIR_CODE) so a floor report resolves to THIS exact session
+    // regardless of IP (fixes NAT / Docker / localhost multi-tab collisions).
+    // PRIVACY: the code maps only to {sessionId,userId} in memory with a TTL;
+    // it is never logged here (we do NOT include it in any log line).
+    const userId = this.sessionUser.get(client.sessionId);
+    if (userId) {
+      const code = container.pairCodes.mint(client.sessionId, userId, Date.now());
+      const codePayload: FloorSyncCodePayload = { code };
+      client.send(S2C.FLOOR_SYNC_CODE, codePayload);
+    }
+
     const ip = this.sessionIp.get(client.sessionId);
     const place = container.floorLocation.classify(ip);
     snap.place = place;
@@ -952,8 +1075,8 @@ export class OfficeRoom extends Room {
     // Seat the player on the floor the event belongs to. They must already be on
     // that floor (the client only shows events for the floor it is rendering).
     const snap = this.players.get(client.sessionId);
-    const floorId = this.eventFloor.get(eventId) ?? snap?.floorId ?? this.groundFloorId;
-    const map = this.floors.get(floorId) ?? this.floors.get(this.groundFloorId)!;
+    const floorId = this.eventFloor.get(eventId) ?? snap?.floorId ?? this.mainOfficeFloorId;
+    const map = this.floors.get(floorId) ?? this.floors.get(this.mainOfficeFloorId)!;
     const anchor = anchorFor(map, result.event.areaName, result.anchorIndex);
     this.teleport(client.sessionId, anchor.x, anchor.y);
 
@@ -995,25 +1118,48 @@ export class OfficeRoom extends Room {
     }
     if (!meeting || meeting.id !== meetingId) return;
 
+    // Record the explicit Join (human agency) so an "everyone" meeting that was
+    // already in progress when this user joined now drives their presence too.
+    container.presence.markMeetingJoined(client.sessionId, meeting.id);
+
     // Allocate the lowest free seat slot for this meeting (idempotent on
     // re-join; freed slots are reused without colliding with an occupant). The
     // meeting room is seated on the player's CURRENT floor (meetings are
     // per-floor; the meeting room name resolves against that floor's anchors,
-    // falling back to the ground floor if the player's floor lacks the room).
+    // falling back to the MAIN OFFICE floor — which owns the named meeting rooms
+    // — if the player's floor lacks the room).
     const snap = this.players.get(client.sessionId);
-    const floorId = snap?.floorId ?? this.groundFloorId;
-    let map = this.floors.get(floorId) ?? this.floors.get(this.groundFloorId)!;
+    if (!snap) return;
+    const currentFloorId = snap.floorId ?? this.spawnFloorId;
+    // Resolve the floor that actually OWNS the named meeting room. Prefer the
+    // player's current floor (so a meeting in a room that exists on this floor
+    // seats them here), then the room's first owning floor, then the main office.
+    let map = this.floors.get(currentFloorId) ?? this.floors.get(this.mainOfficeFloorId)!;
     if (!map.anchors[meeting.roomName]) {
-      map = this.floors.get(this.groundFloorId)!;
+      const owner = this.building.floors.find((f) => f.anchors[meeting.roomName]);
+      map = owner ?? this.floors.get(this.mainOfficeFloorId)!;
     }
     const seatIndex = this.meetingSlots.assign(meeting.id, client.sessionId);
     const anchor = anchorFor(map, meeting.roomName, seatIndex);
+
+    // If the meeting room lives on a DIFFERENT floor than the player, take the
+    // joiner to that floor before seating them (mirrors handleLeaveMeeting's
+    // floor-aware return). Stepping into a meeting is an explicit Join click, so
+    // moving the avatar — including across floors — is consented (human agency).
+    // Without this, a player off the room's floor would be teleported to the
+    // room's (x,y) but stay on their own floor, landing in an empty tile away
+    // from the other participants.
+    if (map.id !== currentFloorId) {
+      this.changeFloor(client, snap, currentFloorId, map.id, anchor.x, anchor.y, snap.dir);
+      return;
+    }
+
     this.teleport(client.sessionId, anchor.x, anchor.y);
 
     // Visible to ALL ON THE FLOOR. Do NOT change manual status — IN_MEETING comes
     // from the calendar source already (the presence engine handles it).
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: anchor.x, y: anchor.y };
-    this.broadcastToFloor(snap?.floorId ?? this.groundFloorId, S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(currentFloorId, S2C.PLAYER_TELEPORTED, tp);
   }
 
   private handleLeaveMeeting(client: Client): void {
@@ -1027,15 +1173,16 @@ export class OfficeRoom extends Room {
     const seat = this.homeSeat.get(client.sessionId);
     if (!seat) return;
     const snap = this.players.get(client.sessionId);
-    // The home seat is on the ground floor. If the player wandered to another
-    // floor, returning them to their desk also returns them to the ground floor.
-    if (snap && (snap.floorId ?? this.groundFloorId) !== this.groundFloorId) {
-      this.changeFloor(client, snap, snap.floorId ?? this.groundFloorId, this.groundFloorId, seat.x, seat.y, "down");
+    // The home seat is a desk on the MAIN OFFICE floor (where the player spawned).
+    // If the player wandered to another floor, returning them to their desk also
+    // returns them to the main office floor (via the same floor-change machinery).
+    if (snap && (snap.floorId ?? this.groundFloorId) !== this.spawnFloorId) {
+      this.changeFloor(client, snap, snap.floorId ?? this.groundFloorId, this.spawnFloorId, seat.x, seat.y, "down");
       return;
     }
     this.teleport(client.sessionId, seat.x, seat.y);
     const tp: PlayerTeleportedPayload = { sessionId: client.sessionId, x: seat.x, y: seat.y };
-    this.broadcastToFloor(this.groundFloorId, S2C.PLAYER_TELEPORTED, tp);
+    this.broadcastToFloor(this.spawnFloorId, S2C.PLAYER_TELEPORTED, tp);
   }
 
   // -------------------------------------------------------------------------
@@ -1083,6 +1230,39 @@ export class OfficeRoom extends Room {
     return { x: sx, y: sy };
   }
 
+  /**
+   * Resolve a FREE, walkable, NON-portal landing tile near (seedX,seedY) on
+   * `map`, de-stacking concurrent arrivals. Occupancy is scoped to players ON
+   * THAT FLOOR. Used by the elevator path so two riders crossing onto the same
+   * portal target do not overlap (mirrors assignSpawn's ring-scan). Portal tiles
+   * are skipped so a deposited rider never immediately re-triggers a crossing.
+   */
+  private freeTileNear(map: Floor, seedX: number, seedY: number): { x: number; y: number } {
+    const occupied = new Set<string>();
+    for (const p of this.players.values()) {
+      if ((p.floorId ?? this.groundFloorId) !== map.id) continue;
+      occupied.add(`${p.x},${p.y}`);
+    }
+    const usable = (x: number, y: number): boolean =>
+      isWalkable(map, x, y) &&
+      !occupied.has(`${x},${y}`) &&
+      portalAt(map, x, y) === null;
+
+    if (usable(seedX, seedY)) return { x: seedX, y: seedY };
+    for (let r = 1; r < Math.max(map.width, map.height); r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = seedX + dx;
+          const y = seedY + dy;
+          if (usable(x, y)) return { x, y };
+        }
+      }
+    }
+    // Last resort (no free non-portal tile): the seed tile as-is.
+    return { x: seedX, y: seedY };
+  }
+
   /** Apply a teleport to the authoritative snapshot. */
   private teleport(sessionId: string, x: number, y: number): void {
     const snap = this.players.get(sessionId);
@@ -1094,6 +1274,88 @@ export class OfficeRoom extends Room {
   /** Snapshot copy of every connected player (admin REST read model). */
   listPlayers(): PlayerSnapshot[] {
     return Array.from(this.players.values()).map((p) => ({ ...p }));
+  }
+
+  /** The active building's floor ids (for SSID->floor validation). */
+  floorIds(): string[] {
+    return this.building.floors.map((f) => f.id);
+  }
+
+  /**
+   * Apply an SSID-derived floor report to live HUMAN sessions sharing `clientIp`
+   * (the companion + browser run on the same machine, so they share a LAN IP).
+   * The floor-report HTTP route is the ONLY caller; the room stays the only
+   * Colyseus-aware module.
+   *
+   * For each matched session that has OPTED IN to floor sync (locationSync), set
+   * place="OFFICE" and, when the resolved floor differs from the current one,
+   * perform the SAME consented floor change the elevator/SET_LOCATION_SYNC path
+   * uses (free landing tile, PLAYER_LEFT/JOINED + FLOOR_CHANGED), then broadcast
+   * S2C.LOCATION (floor-scoped). Sessions that have NOT opted in are left
+   * untouched (human agency + opt-in). Returns how many sessions were updated.
+   *
+   * PRIVACY (AGENTS.md Principle 1): `clientIp` is matched against the transient
+   * per-session IP captured in onAuth and is NEVER logged or persisted here; the
+   * SSID never reaches this method (it was resolved to a floor id upstream).
+   */
+  applyFloorReport(clientIp: string | undefined, floorId: string): number {
+    if (!clientIp || !this.floors.has(floorId)) return 0;
+    let matched = 0;
+    // Snapshot the session ids first: changeFloor mutates while we iterate.
+    const sessionIds = Array.from(this.sessionIp.keys());
+    for (const sessionId of sessionIds) {
+      if (this.sessionIp.get(sessionId) !== clientIp) continue;
+      matched += this.applyFloorToSession(sessionId, floorId);
+    }
+    return matched;
+  }
+
+  /**
+   * Apply an SSID-derived floor report to ONE explicitly identified session,
+   * IGNORING IP. The floor-report HTTP route calls this when the companion sent
+   * a valid PAIRING CODE (S2C.FLOOR_SYNC_CODE), which ties the report to the
+   * exact session that minted it — fixing the IP-match ambiguity behind NAT, a
+   * VPN egress, Docker, or several localhost tabs.
+   *
+   * The opt-in gate + consented-change + privacy rules are IDENTICAL to the
+   * IP-matched path (it delegates to the same applyFloorToSession helper):
+   * a code for a NOT-opted-in session is a benign no-op (returns 0). The caller
+   * resolved code -> sessionId; this method never sees the code, IP, or SSID.
+   */
+  applyFloorReportBySession(sessionId: string, floorId: string): number {
+    if (!this.floors.has(floorId)) return 0;
+    return this.applyFloorToSession(sessionId, floorId);
+  }
+
+  /**
+   * Apply the resolved floor to a single session IF it has opted in. Shared by
+   * the IP-matched and pair-code paths. Returns 1 when applied, else 0. Performs
+   * the consented floor change (when the floor differs) + the S2C.LOCATION tag.
+   * PRIVACY: no IP/SSID/code is referenced here — only the live session state.
+   */
+  private applyFloorToSession(sessionId: string, floorId: string): number {
+    // OPT-IN gate: only act for sessions that explicitly enabled floor sync.
+    if (this.locationSync.get(sessionId) !== true) return 0;
+    const snap = this.players.get(sessionId);
+    if (!snap || snap.isNpc) return 0;
+    const client = this.clientFor(sessionId);
+    if (!client) return 0;
+
+    // A floor report means the user is physically in the office.
+    snap.place = "OFFICE";
+    const currentFloorId = snap.floorId ?? this.groundFloorId;
+
+    if (currentFloorId !== floorId) {
+      // Consented floor change (the user opted in) — reuse elevator machinery.
+      const target = this.floors.get(floorId)!;
+      const land = this.freeTileNear(target, target.spawn.x, target.spawn.y);
+      this.changeFloor(client, snap, currentFloorId, floorId, land.x, land.y, snap.dir);
+    }
+
+    // Broadcast the Office tag on the (possibly new) floor (co-located only).
+    const location: LocationPayload = { sessionId, place: "OFFICE" };
+    this.broadcastToFloor(snap.floorId ?? this.groundFloorId, S2C.LOCATION, location);
+    return 1;
   }
 
   /** Other players (excluding `sessionId`) currently on `floorId`. */
@@ -1110,7 +1372,7 @@ export class OfficeRoom extends Room {
   /** Active social events scoped to a floor (admin events default to ground). */
   private activeEventsOnFloor(floorId: string, now: number): SocialEvent[] {
     return container.events.activeEvents(now).filter((e) => {
-      const ef = this.eventFloor.get(e.id) ?? this.groundFloorId;
+      const ef = this.eventFloor.get(e.id) ?? this.mainOfficeFloorId;
       return ef === floorId;
     });
   }
@@ -1151,6 +1413,156 @@ export class OfficeRoom extends Room {
       if (c === except) continue;
       if (this.floorIdOfClient(c) === floorId) c.send(type, message);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Proximity voice/video signaling relay (P2P WebRTC).
+  //
+  // The room is a DUMB RELAY: it validates the target is a same-floor human and
+  // forwards the opaque payload to that one peer. Media is peer-to-peer and
+  // never touches the server. PRIVACY (Constitution: presence, not surveillance)
+  // — we NEVER log who called whom, call kind, duration, or any call content.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Resolve the target client IFF it is a HUMAN currently on the SAME floor as
+   * the sender (and not the sender themselves). Returns undefined otherwise so
+   * the caller silently drops the relay. Same-floor is the hard gate; an
+   * additional distance gate is applied only to call *requests* (see below).
+   */
+  private rtcPeer(client: Client, targetSessionId: unknown): Client | undefined {
+    if (typeof targetSessionId !== "string" || targetSessionId === client.sessionId) return undefined;
+    const me = this.players.get(client.sessionId);
+    const them = this.players.get(targetSessionId);
+    if (!me || me.isNpc || !them || them.isNpc) return undefined;
+    const myFloor = me.floorId ?? this.groundFloorId;
+    const theirFloor = them.floorId ?? this.groundFloorId;
+    if (myFloor !== theirFloor) return undefined;
+    return this.clientFor(targetSessionId);
+  }
+
+  /** Relay proximity call control (request/accept/reject/cancel/hangup). */
+  private handleRtcCall(client: Client, payload: RtcCallC2S): void {
+    if (!this.allow(this.actionBuckets, client.sessionId)) return;
+    const kind = payload?.kind;
+    const action = payload?.action;
+    if (kind !== "audio" && kind !== "video") return;
+    if (!RTC_CALL_ACTIONS.has(action)) return;
+
+    const me = this.players.get(client.sessionId);
+    if (!me || me.isNpc) return;
+    const peer = this.rtcPeer(client, payload?.to);
+    if (!peer) return;
+
+    // Soft anti-spam gate: a call may only be INITIATED when the two avatars are
+    // genuinely near (a touch wider than the UI's button radius so a click is
+    // not lost to a one-tile drift). accept/reject/cancel/hangup are NOT
+    // distance-gated so an in-progress call survives normal walking.
+    if (action === "request") {
+      const them = this.players.get(peer.sessionId)!;
+      if (chebyshev(me.x, me.y, them.x, them.y) > CALL_REQUEST_TILES) return;
+    }
+
+    const out: RtcCallS2C = { from: client.sessionId, fromName: me.name, kind, action };
+    peer.send(S2C.RTC_CALL, out);
+  }
+
+  /** Relay an opaque WebRTC signaling blob (SDP offer/answer or ICE) to a peer. */
+  private handleRtcSignal(client: Client, payload: RtcSignalC2S): void {
+    if (!this.allow(this.rtcBuckets, client.sessionId)) return;
+    if (payload?.data === undefined) return;
+    const peer = this.rtcPeer(client, payload?.to);
+    if (!peer) return;
+    const out: RtcSignalS2C = { from: client.sessionId, data: payload.data };
+    peer.send(S2C.RTC_SIGNAL, out);
+  }
+
+  // -------------------------------------------------------------------------
+  // Per-department collaborative whiteboards.
+  //
+  // `board` is a Department name. Boards are DEPARTMENT-scoped (a team spans
+  // floors), not floor-scoped: strokes go to everyone currently VIEWING that
+  // board. The server stores strokes (WhiteboardService) so a late opener gets
+  // the full board. PRIVACY: only the drawing is kept — never who drew what.
+  // -------------------------------------------------------------------------
+
+  /** Subscriber set for a board (created on first open). */
+  private wbSubscribers(board: string): Set<string> {
+    let set = this.wbSubs.get(board);
+    if (!set) {
+      set = new Set();
+      this.wbSubs.set(board, set);
+    }
+    return set;
+  }
+
+  /** Send to every HUMAN client currently viewing `board` except `exceptId`. */
+  private broadcastToBoard(board: string, exceptId: string | null, type: string, message: unknown): void {
+    const subs = this.wbSubs.get(board);
+    if (!subs) return;
+    for (const c of this.clients) {
+      if (c.sessionId === exceptId) continue;
+      if (subs.has(c.sessionId)) c.send(type, message);
+    }
+  }
+
+  private handleWhiteboardOpen(client: Client, payload: WhiteboardOpenC2S): void {
+    if (!this.allow(this.actionBuckets, client.sessionId)) return;
+    const board = payload?.board;
+    if (!WB_DEPARTMENTS.has(board)) return;
+    const snap = this.players.get(client.sessionId);
+    if (!snap || snap.isNpc) return;
+    this.wbSubscribers(board).add(client.sessionId);
+
+    const elements = container.whiteboard.elements(board);
+    const CHUNK_SIZE = 400; // Elements per chunk, safe for WebSocket limit
+    const totalChunks = Math.ceil(elements.length / CHUNK_SIZE) || 1;
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk: WhiteboardStateChunkS2C = {
+        board,
+        chunkIndex: i,
+        totalChunks,
+        elements: elements.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+      };
+      client.send(S2C.WHITEBOARD_STATE_CHUNK, chunk);
+    }
+  }
+
+  private handleWhiteboardClose(client: Client, payload: WhiteboardCloseC2S): void {
+    const board = payload?.board;
+    if (typeof board !== "string") return;
+    this.wbSubs.get(board)?.delete(client.sessionId);
+  }
+
+  private handleWhiteboardUpdate(client: Client, payload: WhiteboardUpdateC2S): void {
+    if (!this.allow(this.wbBuckets, client.sessionId)) return;
+    const board = payload?.board;
+    if (!WB_DEPARTMENTS.has(board)) return;
+    const snap = this.players.get(client.sessionId);
+    if (!snap || snap.isNpc) return;
+    // Must be a viewer of the board to edit it (open it first).
+    if (!this.wbSubs.get(board)?.has(client.sessionId)) return;
+    const elements = sanitizeElements(payload?.elements);
+    if (elements.length === 0) return;
+    // Merge by version; only rebroadcast what actually changed (drops echoes).
+    const applied = container.whiteboard.applyElements(board, elements);
+    if (applied.length === 0) return;
+    const out: WhiteboardUpdateS2C = { board, elements: applied };
+    this.broadcastToBoard(board, client.sessionId, S2C.WHITEBOARD_UPDATE, out);
+  }
+
+  private handleWhiteboardClear(client: Client, payload: WhiteboardClearC2S): void {
+    if (!this.allow(this.actionBuckets, client.sessionId)) return;
+    const board = payload?.board;
+    if (!WB_DEPARTMENTS.has(board)) return;
+    const snap = this.players.get(client.sessionId);
+    if (!snap || snap.isNpc) return;
+    if (!this.wbSubs.get(board)?.has(client.sessionId)) return;
+    container.whiteboard.clear(board);
+    const out: WhiteboardClearS2C = { board };
+    // Include the sender so every viewer (incl. the clearer's other tabs) resets.
+    this.broadcastToBoard(board, null, S2C.WHITEBOARD_CLEAR, out);
   }
 
   // -------------------------------------------------------------------------
@@ -1221,34 +1633,23 @@ export class OfficeRoom extends Room {
     gamePlayer: GamePlayer,
     mode: "ai" | "group" | undefined,
   ): void {
-    if (!game.player1) {
-      game.player1 = gamePlayer;
-      this.lockForGame(client.sessionId);
-      if (mode === "ai") {
-        game.vsAi = true;
-        game.player2 = { sessionId: POOL_AI_SESSION_ID, name: "Pool Bot", avatarId: "slate" };
-        game.status = "playing";
-        this.resetGameState(game);
-      } else {
-        game.vsAi = false;
-        game.status = "waiting";
-      }
-    } else if (!game.player2 && !game.vsAi) {
-      game.player2 = gamePlayer;
-      this.lockForGame(client.sessionId);
-      game.status = "playing";
-      this.resetGameState(game);
-    } else {
-      // Spectator: no seat. Push them the current state so they can watch.
-      const c = this.clientFor(client.sessionId);
-      if (c) c.send(S2C.GAME_UPDATE, { game });
-      return;
+    const result = joinPool(game, gamePlayer, mode);
+    this.applyPoolLifecycle(game, result);
+    // player1 always breaks, so the AI never needs scheduling at join time.
+  }
+
+  /** Apply a framework-free pool lifecycle decision: presence locks + broadcast. */
+  private applyPoolLifecycle(game: ActiveGame, result: PoolLifecycleResult): void {
+    for (const sid of result.lock) this.lockForGame(sid);
+    for (const sid of result.unlock) {
+      container.presence.setManual(sid, "AVAILABLE");
+      container.presence.tick(Date.now());
     }
-
-    this.broadcast(S2C.GAME_UPDATE, { game });
-
-    // If the AI happens to break (it is player1's opponent and player1 always
-    // breaks here), no scheduling is needed — player1/human breaks first.
+    if (result.spectator) {
+      const c = this.clientFor(result.spectator);
+      if (c) c.send(S2C.GAME_UPDATE, { game });
+    }
+    if (result.broadcast) this.broadcast(S2C.GAME_UPDATE, { game });
   }
 
   /** Set a human to FOCUS for the duration of a game (locks ambient walking UI). */
@@ -1449,10 +1850,20 @@ export class OfficeRoom extends Room {
     const gameId = payload?.gameId;
     if (typeof gameId !== "string") return;
     const game = this.games.get(gameId);
-    if (!game || game.status !== "playing") return;
+    if (!game) return;
 
     const input = payload?.input;
     if (!input) return;
+
+    // Rematch / "Play again": valid AFTER a pool game is over. Handled before the
+    // "must be playing" gate so a finished table is never left locked. A seated
+    // player resets the rack with the SAME seats and re-breaks.
+    if (game.type === "pool" && input.rematch === true) {
+      this.handlePoolRematch(client.sessionId, game);
+      return;
+    }
+
+    if (game.status !== "playing") return;
 
     if (game.type === "pool") {
       this.handlePoolShot(client.sessionId, game, input);
@@ -1484,6 +1895,10 @@ export class OfficeRoom extends Room {
 
       if (this.checkTicTacToeWin(state.board, symbol)) {
         game.winnerSessionId = client.sessionId;
+        // Credit the winner so the scoreboard / "Final Score" reflect the round
+        // (mirrors ping-pong, which already increments score1/score2).
+        if (client.sessionId === game.player1!.sessionId) game.score1++;
+        else game.score2++;
         game.status = "gameover";
       } else if (state.board.every((c) => c !== "")) {
         game.winnerSessionId = null; // draw
@@ -1514,6 +1929,10 @@ export class OfficeRoom extends Room {
 
       if (this.checkConnectFourWin(state.board, token)) {
         game.winnerSessionId = client.sessionId;
+        // Credit the winner so the scoreboard / "Final Score" reflect the round
+        // (mirrors ping-pong, which already increments score1/score2).
+        if (client.sessionId === game.player1!.sessionId) game.score1++;
+        else game.score2++;
         game.status = "gameover";
       } else if (state.board.every((row) => row.every((c) => c !== ""))) {
         game.winnerSessionId = null; // draw
@@ -1638,61 +2057,44 @@ export class OfficeRoom extends Room {
    *   - resets the table to idle once empty so the station frees up.
    */
   private leavePool(game: ActiveGame, sessionId: string): void {
-    let removed = false;
-    let wasPlayer1 = false;
-    if (game.player1?.sessionId === sessionId) {
-      game.player1 = null;
-      removed = true;
-      wasPlayer1 = true;
-    } else if (game.player2?.sessionId === sessionId) {
-      game.player2 = null;
-      removed = true;
-    }
-    if (!removed) return; // spectator left — nothing to free
-
-    container.presence.setManual(sessionId, "AVAILABLE");
-    container.presence.tick(Date.now());
-
-    // Cancel a pending AI shot for this table.
+    // Cancel a pending AI shot for this table before mutating seats.
     const timer = this.poolAiTimers.get(game.id);
     if (timer) {
       timer.clear();
       this.poolAiTimers.delete(game.id);
     }
 
-    if (game.status === "playing") {
-      if (game.vsAi) {
-        // The lone human left a solo game: drop the AI seat and reset the table.
-        game.player1 = null;
-        game.player2 = null;
-        game.vsAi = false;
-        game.status = "idle";
-        game.state = null;
-        game.winnerSessionId = null;
-      } else {
-        // Two-human game in progress: the remaining human wins by forfeit.
-        const remaining = wasPlayer1 ? game.player2 : game.player1;
-        if (remaining) {
-          game.winnerSessionId = remaining.sessionId;
-          game.status = "gameover";
-        } else {
-          game.status = "idle";
-          game.state = null;
-        }
-      }
-    } else {
-      // waiting / gameover: collapse to idle when empty, else keep the lone seat.
-      if (!game.player1 && !game.player2) {
-        game.status = "idle";
-        game.state = null;
-        game.vsAi = false;
-        game.winnerSessionId = null;
-      } else {
-        game.status = "waiting";
-      }
+    const result = leavePool(game, sessionId);
+    this.applyPoolLifecycle(game, result);
+  }
+
+  /**
+   * Rematch / "Play again". Valid only when the pool game is OVER and the
+   * requester occupies a real seat (spectators and the AI cannot trigger it). The
+   * SAME seats are kept (human-vs-AI or the two humans), the rack is reset, player1
+   * re-breaks, status returns to "playing", and a fresh GAME_UPDATE is broadcast.
+   * The table is never left in a terminal/locked state.
+   */
+  private handlePoolRematch(sessionId: string, game: ActiveGame): void {
+    if (game.type !== "pool") return;
+
+    // Cancel any stale AI timer before (potentially) re-racking.
+    const t = this.poolAiTimers.get(game.id);
+    if (t) {
+      t.clear();
+      this.poolAiTimers.delete(game.id);
     }
 
-    this.broadcast(S2C.GAME_UPDATE, { game });
+    const result = rematchPool(game, sessionId);
+    if (!result.broadcast) return; // not allowed (not over / not seated / no opponent)
+    this.applyPoolLifecycle(game, result);
+
+    // If (somehow) the AI is to break, schedule it. With player1 always breaking
+    // and the AI in seat 2, this is a no-op in practice.
+    const st = game.state as PoolState | null;
+    if (game.vsAi && st && st.currentTurn === POOL_AI_SESSION_ID) {
+      this.scheduleAiPoolTurn(game);
+    }
   }
 
   /** Schedule the AI's pool shot after a brief, animation-friendly delay. */
@@ -1755,6 +2157,33 @@ function manhattan(ax: number, ay: number, bx: number, by: number): number {
 
 function isValidDir(dir: unknown): dir is Direction {
   return dir === "up" || dir === "down" || dir === "left" || dir === "right";
+}
+
+/**
+ * Validate an inbound batch of Excalidraw elements before merging/broadcasting.
+ * We treat each element as opaque JSON but REQUIRE the reconcile keys (string
+ * id, finite numeric version) and bound the batch + per-element size so a
+ * malicious client cannot inject huge payloads. Malformed elements are dropped
+ * individually; the surviving ones are returned.
+ */
+function sanitizeElements(raw: unknown): WhiteboardElement[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WhiteboardElement[] = [];
+  for (const item of raw.slice(0, WB_MAX_ELEMENTS_PER_MSG)) {
+    if (!item || typeof item !== "object") continue;
+    const el = item as Partial<WhiteboardElement>;
+    if (typeof el.id !== "string" || el.id.length === 0 || el.id.length > 64) continue;
+    if (typeof el.version !== "number" || !Number.isFinite(el.version)) continue;
+    let size = 0;
+    try {
+      size = JSON.stringify(item).length;
+    } catch {
+      continue; // not serializable (circular / BigInt) — reject
+    }
+    if (size > WB_MAX_ELEMENT_BYTES) continue;
+    out.push(item as WhiteboardElement);
+  }
+  return out;
 }
 
 const EMOTE_SET: ReadonlySet<string> = new Set(EMOTES);
