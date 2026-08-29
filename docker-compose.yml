@@ -1,13 +1,16 @@
 services:
-  app:
+  pixeloffice:
     image: djdiptayan/pixeloffice:latest
     pull_policy: always
     container_name: pixeloffice-app
     init: true
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env.pixeloffice
+        required: false
+      - path: .env
+        required: false
     environment:
-      PORT: "2567"
+      PORT: 2567
     ports:
       - "127.0.0.1:2567:2567"
