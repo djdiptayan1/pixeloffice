@@ -270,6 +270,12 @@ export class OfficeScene extends Phaser.Scene {
   }
 
   private drawWorld(): void {
+    // If Floor 2 (main office) has no areas (e.g. from an older corrupted map save),
+    // defensively restore the rich office areas so the floor never renders blank sand.
+    if (this.floorId === MAIN_OFFICE_FLOOR_ID && (!this.map.areas || this.map.areas.length === 0)) {
+      this.map.areas = buildOfficeMap().areas;
+    }
+
     // Floors: paint each area's floor, hallway elsewhere. Pick one of the
     // deterministic variant tiles per position so large floors don't band.
     for (let y = 0; y < this.map.height; y++) {
