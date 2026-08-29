@@ -14,3 +14,10 @@ services:
       PORT: 2567
     ports:
       - "127.0.0.1:2567:2567"
+    networks:
+      - default
+
+networks:
+  default:
+    name: services_default
+    external: true
