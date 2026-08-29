@@ -73,6 +73,13 @@ export function createMapsRouter(): Router {
     }
   });
 
+  // POST /api/maps/reset — reset to the default 3-floor building seed ----------
+  router.post("/reset", guard, (_req: Request, res: Response) => {
+    const building = container.maps.resetDefault();
+    log.info("maps reset to default seed", { id: building.id, floors: building.floors.length });
+    res.status(200).json({ ok: true, activeId: building.id });
+  });
+
   // POST /api/maps/:id/activate — make a stored map the active one -----------
   router.post("/:id/activate", guard, (req: Request, res: Response) => {
     const ok = container.maps.setActive(req.params.id);
@@ -84,6 +91,5 @@ export function createMapsRouter(): Router {
     // NOTE: applies to NEW joins/rooms; live players keep their session.
     res.status(200).json({ ok: true, activeId: container.maps.getActiveId() });
   });
-
   return router;
 }

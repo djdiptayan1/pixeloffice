@@ -43,8 +43,9 @@ export interface MapRepository extends EventEmitter {
   getActiveBuilding(): Building;
   /** Id of the active building. */
   getActiveId(): string;
+  /** Reset stored maps to default seed and activate it. */
+  resetDefault(): Building;
 }
-
 export class InMemoryMapRepository extends EventEmitter implements MapRepository {
   private readonly maps = new Map<string, BuildingJSON>();
   private activeId: string;
@@ -97,5 +98,14 @@ export class InMemoryMapRepository extends EventEmitter implements MapRepository
 
   getActiveId(): string {
     return this.activeId;
+  }
+
+  resetDefault(): Building {
+    const seed = buildDefaultBuilding();
+    const json = serializeBuilding(seed);
+    this.maps.set(json.id, json);
+    this.activeId = json.id;
+    this.emit("map-activated", seed);
+    return seed;
   }
 }

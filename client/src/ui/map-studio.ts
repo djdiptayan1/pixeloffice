@@ -449,8 +449,12 @@ export function createMapStudio(
   saveBtn.type = "button";
   saveBtn.className = "ms-btn ms-btn-primary";
   saveBtn.textContent = "Save & Activate";
-  footer.append(statusWrap, testBtn, saveBtn);
-
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "ms-btn ms-danger";
+  resetBtn.textContent = "↺ Reset Default";
+  resetBtn.title = "Restore the default 3-floor office building with all rooms";
+  footer.append(statusWrap, resetBtn, testBtn, saveBtn);
   modal.append(header, body, footer);
   parent.appendChild(backdrop);
 
@@ -1458,6 +1462,29 @@ export function createMapStudio(
       status.textContent = "Live map updated and hot-swapped in real time!";
     }
   }
+  async function resetDefault(): Promise<void> {
+    if (!confirm("Reset all 3 floors back to the default office layout with all original rooms and furniture?")) return;
+    resetBtn.disabled = true;
+    status.className = "ms-status";
+    status.textContent = "Resetting to default layout…";
+    try {
+      const res = await fetch(`${serverHttpBase()}/api/maps/reset`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error(`Reset failed (${res.status})`);
+      }
+      await loadActive();
+      status.className = "ms-status ms-ok";
+      status.textContent = "Reset to default office layout successfully!";
+    } catch (err) {
+      status.className = "ms-status ms-err";
+      status.textContent = `Error: ${(err as Error).message}`;
+    } finally {
+      resetBtn.disabled = false;
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Wiring
@@ -1465,7 +1492,6 @@ export function createMapStudio(
 
   addFloorBtn.addEventListener("click", () => {
     if (!state.building) return;
-    const index = state.building.floors.length;
     let id = `floor-${index}`;
     const existing = new Set(state.building.floors.map((f) => f.id));
     let n = index;
@@ -1478,9 +1504,9 @@ export function createMapStudio(
     renderAll();
   });
 
+  resetBtn.addEventListener("click", () => void resetDefault());
   testBtn.addEventListener("click", () => void testPreview());
   saveBtn.addEventListener("click", () => void saveAndActivate());
-  closeBtn.addEventListener("click", () => handle.close());
   backdrop.addEventListener("mousedown", (ev) => {
     if (ev.target === backdrop) handle.close();
   });
