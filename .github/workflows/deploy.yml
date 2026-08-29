@@ -46,13 +46,14 @@ jobs:
             set -e
             cd /home/ubuntu/services
 
-            # Pull fresh image and recreate container using unified compose stack
+            # Pull fresh image and cleanly recreate container stack
             sudo podman pull djdiptayan/pixeloffice:latest
+            sudo podman-compose down
             sudo podman-compose up -d
 
             # Verify PixelOffice is healthy after redeploy
             for i in $(seq 1 20); do
-              if curl -sf -o /dev/null http://localhost:2567/api/health; then
+              if sudo podman exec pixeloffice-app node -e "require('http').get('http://127.0.0.1:2567/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" 2>/dev/null; then
                 echo "PixelOffice is up and healthy."
                 break
               fi
