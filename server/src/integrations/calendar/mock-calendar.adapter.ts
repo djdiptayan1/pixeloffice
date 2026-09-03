@@ -63,6 +63,19 @@ export class MockCalendarAdapter implements CalendarAdapter {
       .sort((a, b) => a.startTime - b.startTime);
   }
 
+  getMeetings(id: string, nowMs: number): MeetingInfo[] {
+    const lookbackMs = 24 * 60 * 60 * 1000; // ~24h
+    const forwardMs = 12 * 60 * 60 * 1000; // ~12h
+    return this.meetings
+      .filter(
+        (m) =>
+          this.appliesTo(m, id) &&
+          m.endTime > nowMs - lookbackMs &&
+          m.startTime < nowMs + forwardMs,
+      )
+      .sort((a, b) => a.startTime - b.startTime);
+  }
+
   /** All meetings active at `nowMs` regardless of participant (room helper). */
   activeMeetings(nowMs: number): MeetingInfo[] {
     return this.meetings.filter((m) => m.startTime <= nowMs && nowMs < m.endTime);
@@ -96,6 +109,7 @@ export class MockCalendarAdapter implements CalendarAdapter {
       endTime,
       participantIds,
       roomName: input.roomName || assignMeetingRoom(participantIds.length),
+      ...(input.meetLink ? { meetLink: input.meetLink } : {}),
     };
     this.meetings.push(meeting);
     return meeting;

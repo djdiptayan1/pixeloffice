@@ -156,6 +156,7 @@ export const S2C = {
   FLOOR_CHANGED: "floor-changed",
   MEETING_STARTED: "meeting-started",
   MEETING_ENDED: "meeting-ended",
+  MEETINGS: "meetings",
   TOAST: "toast",
   GAME_UPDATE: "game-update",
   /** A player changed their name / department / avatar (profile edit). */
@@ -254,6 +255,7 @@ export interface WelcomePayload {
   events: SocialEvent[];
   /** The local user's current meeting, if one is already in progress. */
   meeting: MeetingInfo | null;
+  meetings?: MeetingInfo[];
   /**
    * The active building summary (floor list). OPTIONAL/backward-compatible: a
    * pre-multifloor client ignores it; a multifloor client renders the floor
@@ -370,6 +372,10 @@ export interface MeetingStartedPayload {
 
 export interface MeetingEndedPayload {
   meetingId: string;
+}
+
+export interface MeetingsPayload {
+  meetings: MeetingInfo[];
 }
 
 export interface ToastPayload {

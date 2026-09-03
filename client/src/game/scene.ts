@@ -81,6 +81,7 @@ interface Avatar {
   badgeIcon: Phaser.GameObjects.Text;
   bubble?: Phaser.GameObjects.Container;
   bubbleTimer?: Phaser.Time.TimerEvent;
+  bubbleY?: number;
   /** Active emote bubble (capped at one per avatar; replaced on a new emote). */
   emote?: Phaser.GameObjects.Container;
   emoteTimer?: Phaser.Time.TimerEvent;
@@ -532,7 +533,7 @@ export class OfficeScene extends Phaser.Scene {
     a.shadow.setPosition(px, py + 5);
     a.nameTag.setPosition(px, py - TILE * 0.95);
     a.badge.setPosition(px + a.nameTag.displayWidth / 2 + 10, py - TILE * 0.95 - 6);
-    if (a.bubble) a.bubble.setPosition(px, py - TILE * 1.35);
+    if (a.bubble) a.bubble.setPosition(px, py + (a.bubbleY ?? -TILE * 1.35));
     if (a.emote) a.emote.setPosition(px, py - TILE * 1.3);
   }
 
@@ -993,12 +994,15 @@ export class OfficeScene extends Phaser.Scene {
     bg.fillRoundedRect(-w / 2, -h / 2, w, h, 5);
     bg.fillTriangle(-5, h / 2 - 1, 5, h / 2 - 1, 0, h / 2 + 6);
 
-    const container = this.add.container(a.sprite.x, a.sprite.y - TILE * 1.35, [bg, label]);
+    const bubbleY = -TILE * 0.95 - a.nameTag.displayHeight - h / 2 - 10;
+    const container = this.add.container(a.sprite.x, a.sprite.y + bubbleY, [bg, label]);
     container.setDepth(DEPTH_OVERLAY + 1);
     a.bubble = container;
+    a.bubbleY = bubbleY;
     a.bubbleTimer = this.time.delayedCall(BUBBLE_MS, () => {
       container.destroy();
       a.bubble = undefined;
+      a.bubbleY = undefined;
       a.bubbleTimer = undefined;
     });
   }

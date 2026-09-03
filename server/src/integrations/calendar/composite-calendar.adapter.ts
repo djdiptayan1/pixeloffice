@@ -34,4 +34,13 @@ export class CompositeCalendarAdapter implements CalendarAdapter {
     ];
     return merged.sort((a, b) => a.startTime - b.startTime);
   }
+
+  getMeetings(userId: string, nowMs: number): MeetingInfo[] {
+    const byId = new Map<string, MeetingInfo>();
+    for (const m of this.primary.getMeetings(userId, nowMs)) byId.set(m.id, m);
+    for (const m of this.secondary.getMeetings(userId, nowMs)) {
+      if (!byId.has(m.id)) byId.set(m.id, m);
+    }
+    return [...byId.values()].sort((a, b) => a.startTime - b.startTime);
+  }
 }

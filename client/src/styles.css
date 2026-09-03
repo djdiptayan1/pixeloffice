@@ -873,36 +873,72 @@ body:not(.office-route) #login-root {
 
 /* ----------------------------- Meetings --------------------------------- */
 
-.meeting-card {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px;
-}
-
-.meeting-title {
-  font-size: 13px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.meeting-details {
-  display: grid;
-  gap: 5px;
-}
-
-.meeting-detail {
+.meeting-board-row {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
-  font-size: 11px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+  cursor: default;
+  transition: background 0.1s ease;
+}
+.meeting-board-row:last-child {
+  border-bottom: none;
+}
+.meeting-board-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.meeting-board-row.past {
+  opacity: 0.55;
   color: var(--muted);
 }
-
-.meeting-detail strong {
-  color: var(--text);
+.meeting-board-row.now {
+  color: #4ad97d;
+}
+.meeting-board-row.upcoming {
+  color: var(--accent-2);
+}
+.meeting-board-row.clickable {
+  cursor: pointer;
+}
+.meeting-board-row.clickable:hover .meeting-board-title {
+  text-decoration: underline;
+}
+.meeting-board-title {
+  flex: 1 1 auto;
   font-weight: 600;
-  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meeting-board-time {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.now-meeting {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid #4ad97d;
+  border-radius: 9px;
+  padding: 9px 10px 11px;
+  margin-bottom: 8px;
+  transition: transform 0.12s var(--ease), border-color 0.15s ease;
+}
+.now-meeting:hover {
+  transform: translateY(-1px);
+  border-color: var(--border);
+}
+.now-meeting.clickable {
+  cursor: pointer;
+}
+.now-meeting.clickable .event-title:hover {
+  text-decoration: underline;
 }
 
 /* ----------------------------- Events ----------------------------------- */
@@ -2276,6 +2312,14 @@ body:not(.office-route) #login-root {
   right: 12px;
   bottom: 58px;
   z-index: 16;
+}
+.ms-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(1);
+}
+.ms-trigger:disabled:hover {
+  transform: none;
 }
 
 /* The hidden attribute's UA display:none loses to our display:flex — restore it. */

@@ -10,6 +10,7 @@ const AWAY = 90_000;
 /** Controllable calendar stub keyed by USER id (the stable identity). */
 class FakeCalendar implements CalendarAdapter {
   current: MeetingInfo | null = null;
+  board: MeetingInfo[] = [];
   throwIt = false;
   getCurrentMeeting(_userId: string, _now: number): MeetingInfo | null {
     if (this.throwIt) throw new Error("calendar down");
@@ -17,6 +18,10 @@ class FakeCalendar implements CalendarAdapter {
   }
   getUpcomingMeetings(): MeetingInfo[] {
     return [];
+  }
+  getMeetings(): MeetingInfo[] {
+    if (this.throwIt) throw new Error("calendar down");
+    return this.board;
   }
 }
 
@@ -48,10 +53,12 @@ function setup() {
   const changes: PresenceChange[] = [];
   const started: Array<{ sessionId: string; meeting: MeetingInfo }> = [];
   const ended: Array<{ sessionId: string; meetingId: string }> = [];
+  const meetingsChanged: Array<{ sessionId: string; meetings: MeetingInfo[] }> = [];
   svc.on("change", (c: PresenceChange) => changes.push(c));
   svc.on("meeting-started", (e) => started.push(e));
   svc.on("meeting-ended", (e) => ended.push(e));
-  return { cal, events, svc, changes, started, ended };
+  svc.on("meetings-changed", (e) => meetingsChanged.push(e));
+  return { cal, events, svc, changes, started, ended, meetingsChanged };
 }
 
 describe("PresenceService — initial tracking", () => {
@@ -183,5 +190,35 @@ describe("PresenceService — manual override + activity", () => {
     svc.activity("s1", NOW + AWAY);
     svc.tick(NOW + AWAY);
     expect(svc.getPresence("s1")).toEqual({ state: PresenceState.AVAILABLE, source: "SYSTEM" });
+  });
+});
+
+
+describe("PresenceService — meetings-changed emission", () => {
+  it("emits once on the first tick and stays quiet while the board list is unchanged", () => {
+    const { svc, meetingsChanged } = setup();
+    svc.track("s1", "u1", NOW);
+    svc.tick(NOW); // OFFLINE -> AVAILABLE; initial board push
+    svc.tick(NOW + AWAY); // presence changes to AWAY, board unchanged
+    expect(meetingsChanged.length).toBe(1);
+    expect(meetingsChanged[0].meetings).toEqual([]);
+  });
+
+  it("emits again when board membership changes", () => {
+    const { cal, svc, meetingsChanged } = setup();
+    svc.track("s1", "u1", NOW);
+    svc.tick(NOW);
+    cal.board = [meeting("m1")];
+    svc.tick(NOW);
+    expect(meetingsChanged.length).toBe(2);
+    expect(meetingsChanged[1].meetings.map((m) => m.id)).toEqual(["m1"]);
+  });
+
+  it("a throwing calendar degrades to an empty board push, never throws", () => {
+    const { cal, svc, meetingsChanged } = setup();
+    svc.track("s1", "u1", NOW);
+    cal.throwIt = true;
+    expect(() => svc.tick(NOW)).not.toThrow();
+    expect(meetingsChanged).toEqual([{ sessionId: "s1", meetings: [] }]);
   });
 });

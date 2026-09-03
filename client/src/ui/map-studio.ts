@@ -463,11 +463,10 @@ export function createMapStudio(
   if (options.mountTrigger !== false) {
     trigger = document.createElement("button");
     trigger.type = "button";
-    // Position/z-index live in styles.css (.ms-trigger) so the bottom-right
-    // dock stays consistent with the Admin button and other HUD chrome.
     trigger.className = "ms-btn ms-trigger";
     trigger.textContent = "🗺 Map Studio";
-    trigger.addEventListener("click", () => handle.open());
+    trigger.disabled = true;
+    trigger.title = "Coming Soon";
     parent.appendChild(trigger);
   }
 

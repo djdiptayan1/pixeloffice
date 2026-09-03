@@ -49,6 +49,41 @@ describe("MockCalendarAdapter — overlap tie-break", () => {
   });
 });
 
+
+describe("MockCalendarAdapter — meeting-board list (getMeetings)", () => {
+  it("returns ended + live + upcoming meetings soonest-first, incl. past ones", () => {
+    const cal = new MockCalendarAdapter();
+    // Admin can only schedule future meetings, so create them first then
+    // query at a later clock.
+    const later = cal.createMeeting({ title: "Later", startsInMinutes: 30, durationMinutes: 5 }, NOW);
+    const live = cal.createMeeting({ title: "Live", startsInMinutes: 5, durationMinutes: 20 }, NOW);
+    const soon = cal.createMeeting({ title: "Soon", startsInMinutes: 60, durationMinutes: 5 }, NOW);
+    const t = NOW + 10 * MIN; // live meeting now active; soon/later upcoming
+
+    const board = cal.getMeetings("u", t);
+    expect(board.map((m) => m.id)).toEqual([live.id, later.id, soon.id]);
+  });
+
+  it("includes a meeting that already ended inside the lookback window", () => {
+    const cal = new MockCalendarAdapter();
+    const m = cal.createMeeting({ title: "Done", startsInMinutes: 0, durationMinutes: 5 }, NOW);
+    const t = NOW + 20 * MIN; // m ended 15 min ago
+    const board = cal.getMeetings("u", t);
+    expect(board.map((x) => x.id)).toEqual([m.id]);
+    // But it is neither current nor upcoming.
+    expect(cal.getCurrentMeeting("u", t)).toBeNull();
+    expect(cal.getUpcomingMeetings("u", t)).toEqual([]);
+  });
+
+  it("only lists meetings that apply to the identity", () => {
+    const cal = new MockCalendarAdapter();
+    cal.createMeeting({ title: "Everyone", startsInMinutes: 0, durationMinutes: 5 }, NOW);
+    cal.createMeeting({ title: "Alice only", startsInMinutes: 0, durationMinutes: 5, participantIds: ["alice"] }, NOW);
+    expect(cal.getMeetings("bob", NOW).map((m) => m.title)).toEqual(["Everyone"]);
+    expect(cal.getMeetings("alice", NOW).map((m) => m.title)).toEqual(["Everyone", "Alice only"]);
+  });
+});
+
 describe("MockCalendarAdapter — upcoming", () => {
   it("excludes a meeting whose startTime == now and sorts soonest-first", () => {
     const cal = new MockCalendarAdapter();

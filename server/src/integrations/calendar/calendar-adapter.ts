@@ -24,6 +24,8 @@ export interface CalendarAdapter {
    * `userId` is the same stable identity as `getCurrentMeeting`.
    */
   getUpcomingMeetings(userId: string, nowMs: number): MeetingInfo[];
+  /** Ended, current, and upcoming meetings around nowMs, soonest first. */
+  getMeetings(userId: string, nowMs: number): MeetingInfo[];
 }
 
 export interface CreateMeetingInput {
@@ -42,4 +44,5 @@ export interface CreateMeetingInput {
    * in the office.
    */
   participantIds?: string[];
+  meetLink?: string;
 }
