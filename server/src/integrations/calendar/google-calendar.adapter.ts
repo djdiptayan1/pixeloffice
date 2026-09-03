@@ -47,6 +47,7 @@ const CAL_SCOPES = [
 const DEFAULT_POLL_MS = 45_000;
 /** Forward window for "upcoming" meetings. */
 const DEFAULT_WINDOW_MS = 12 * 60 * 60 * 1000; // ~12h
+const DEFAULT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 /** Per-request network timeout. */
 const REQUEST_TIMEOUT_MS = 5_000;
 /** Refresh the access token this long before it actually expires. */
@@ -65,6 +66,8 @@ export interface GoogleCalendarConfig {
   includeTitles?: boolean;
   /** Forward window for upcoming meetings (ms). Default ~12h. */
   windowMs?: number;
+  /** Backward lookback for already-ended meetings (ms). Default ~24h. */
+  lookbackMs?: number;
   /** Injectable clock (tests). Defaults to Date.now. */
   now?: () => number;
   /** Injectable warn sink (tests). Defaults to console.warn. */
@@ -123,6 +126,7 @@ export class GoogleCalendarAdapter implements CalendarAdapter {
   private readonly pollIntervalMs: number;
   private readonly includeTitles: boolean;
   private readonly windowMs: number;
+  private readonly lookbackMs: number;
   private readonly now: () => number;
   private readonly warn: (msg: string) => void;
 
@@ -142,6 +146,7 @@ export class GoogleCalendarAdapter implements CalendarAdapter {
     this.pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_MS;
     this.includeTitles = config.includeTitles ?? true;
     this.windowMs = config.windowMs ?? DEFAULT_WINDOW_MS;
+    this.lookbackMs = config.lookbackMs ?? DEFAULT_LOOKBACK_MS;
     this.now = config.now ?? (() => Date.now());
     this.warn = config.warn ?? ((m) => console.warn(m));
   }
@@ -166,6 +171,14 @@ export class GoogleCalendarAdapter implements CalendarAdapter {
     if (!meetings) return [];
     return meetings
       .filter((m) => m.startTime > nowMs)
+      .sort((a, b) => a.startTime - b.startTime);
+  }
+
+  getMeetings(userId: string, nowMs: number): MeetingInfo[] {
+    const meetings = this.cache.get(userId);
+    if (!meetings) return [];
+    return meetings
+      .filter((m) => m.endTime > nowMs - this.lookbackMs)
       .sort((a, b) => a.startTime - b.startTime);
   }
 
@@ -313,14 +326,10 @@ export class GoogleCalendarAdapter implements CalendarAdapter {
     accessToken: string,
   ): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> {
     const now = this.now();
-    // VERIFIED semantics: timeMin filters event END (exclusive), timeMax filters
-    // event START (exclusive). To include in-progress meetings (start<=now<end)
-    // AND upcoming ones in the forward window, ask for events ending after now
-    // and starting before now+window.
     const params = new URLSearchParams({
       singleEvents: "true",
       orderBy: "startTime",
-      timeMin: new Date(now).toISOString(),
+      timeMin: new Date(now - this.lookbackMs).toISOString(),
       timeMax: new Date(now + this.windowMs).toISOString(),
       maxResults: "50",
     });

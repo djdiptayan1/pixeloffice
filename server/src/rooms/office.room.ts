@@ -42,6 +42,7 @@ import {
   type JoinEventPayload,
   type JoinMeetingPayload,
   type MeetingInfo,
+  type MeetingsPayload,
   type MovePayload,
   type Building,
   type Floor,
@@ -277,6 +278,7 @@ export class OfficeRoom extends Room {
   private onPresenceChange?: (c: { sessionId: string; state: PresenceState; source: PresenceSource }) => void;
   private onMeetingStarted?: (e: { sessionId: string; meeting: MeetingInfo }) => void;
   private onMeetingEnded?: (e: { sessionId: string; meetingId: string }) => void;
+  private onMeetingsChanged?: (e: { sessionId: string; meetings: MeetingInfo[] }) => void;
   private onEventCreated?: (event: SocialEvent) => void;
   private onEventUpdated?: (event: SocialEvent) => void;
   private onEventEnded?: (eventId: string) => void;
@@ -497,6 +499,14 @@ export class OfficeRoom extends Room {
     };
     presence.on("meeting-ended", this.onMeetingEnded);
 
+    this.onMeetingsChanged = ({ sessionId, meetings }) => {
+      const client = this.clientFor(sessionId);
+      if (!client) return; // not our session
+      if (this.joining.has(sessionId)) return; // WELCOME carries it
+      client.send(S2C.MEETINGS, { meetings } satisfies MeetingsPayload);
+    };
+    presence.on("meetings-changed", this.onMeetingsChanged);
+
     this.onEventCreated = (event: SocialEvent) => {
       // Events are per-floor. Admin REST creates them without a floor, so they
       // belong to the MAIN OFFICE floor (the rich layout that owns Coffee Area /
@@ -642,13 +652,14 @@ export class OfficeRoom extends Room {
       snapshot.source = resolved.source;
     }
 
-    // Build WELCOME: self, all others, active events, current meeting (if any).
-    // Keyed by the STABLE userId (not sessionId) — the calendar seam's contract.
     let currentMeeting: MeetingInfo | null = null;
+    let boardMeetings: MeetingInfo[] = [];
     try {
       currentMeeting = container.calendar.getCurrentMeeting(identity.userId, now);
+      boardMeetings = container.calendar.getMeetings(identity.userId, now);
     } catch {
       currentMeeting = null;
+      boardMeetings = [];
     }
 
     const welcome: WelcomePayload = {
@@ -657,6 +668,7 @@ export class OfficeRoom extends Room {
       players: this.othersOnFloor(client.sessionId, this.spawnFloorId),
       events: this.activeEventsOnFloor(this.spawnFloorId, now),
       meeting: currentMeeting,
+      meetings: boardMeetings,
       building: this.buildingSummary(),
     };
     // Colyseus completes the matchmake/join response before the client wrapper
@@ -747,6 +759,7 @@ export class OfficeRoom extends Room {
     if (this.onPresenceChange) presence.off("change", this.onPresenceChange);
     if (this.onMeetingStarted) presence.off("meeting-started", this.onMeetingStarted);
     if (this.onMeetingEnded) presence.off("meeting-ended", this.onMeetingEnded);
+    if (this.onMeetingsChanged) presence.off("meetings-changed", this.onMeetingsChanged);
     if (this.onEventCreated) events.off("created", this.onEventCreated);
     if (this.onEventUpdated) events.off("updated", this.onEventUpdated);
     if (this.onEventEnded) events.off("ended", this.onEventEnded);

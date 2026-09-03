@@ -98,14 +98,6 @@ function timeLabel(epochMs: number): string {
   return TIME_FMT.format(new Date(epochMs));
 }
 
-function durationLabel(startTime: number, endTime: number): string {
-  const mins = Math.max(1, Math.round((endTime - startTime) / 60000));
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return m ? `${h}h ${m}m` : `${h}h`;
-}
-
 export interface HudCallbacks {
   onSetStatus(state: SetStatusPayload["state"]): void;
   onJoinEvent(eventId: string): void;
@@ -439,42 +431,47 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     }
   }
 
-  function renderMeetingDetails(m: MeetingInfo | null): void {
+  function renderMeetingDetails(state: UiState): void {
     meetingsBody.innerHTML = "";
-    if (!m) {
+    const now = Date.now();
+    const today = new Date(now).toDateString();
+    const meetings = state.myMeetings
+      .filter((m) => new Date(m.startTime).toDateString() === today || new Date(m.endTime).toDateString() === today)
+      .sort((a, b) => a.startTime - b.startTime);
+
+    if (meetings.length === 0) {
       const empty = document.createElement("div");
       empty.className = "hud-empty";
-      empty.textContent = "No active meeting.";
+      empty.textContent = "No meetings today.";
       meetingsBody.appendChild(empty);
       return;
     }
 
-    const card = document.createElement("div");
-    card.className = "meeting-card";
-    const title = document.createElement("div");
-    title.className = "meeting-title";
-    title.textContent = m.title;
-    const details = document.createElement("div");
-    details.className = "meeting-details";
-    details.append(
-      detailRow("Start", timeLabel(m.startTime)),
-      detailRow("Duration", durationLabel(m.startTime, m.endTime)),
-      detailRow("Room", m.roomName),
-      detailRow("Invitees", m.participantIds.length === 0 ? "Everyone" : `${m.participantIds.length}`),
-    );
-    card.append(title, details);
-    meetingsBody.appendChild(card);
-  }
+    for (const m of meetings) {
+      const row = document.createElement("div");
+      row.className = "meeting-board-row";
+      if (m.endTime <= now) row.classList.add("past");
+      else if (m.startTime <= now) row.classList.add("now");
+      else row.classList.add("upcoming");
 
-  function detailRow(label: string, value: string): HTMLElement {
-    const row = document.createElement("div");
-    row.className = "meeting-detail";
-    const k = document.createElement("span");
-    k.textContent = label;
-    const v = document.createElement("strong");
-    v.textContent = value;
-    row.append(k, v);
-    return row;
+      const title = document.createElement("div");
+      title.className = "meeting-board-title";
+      title.textContent = m.title;
+
+      const when = document.createElement("div");
+      when.className = "meeting-board-time";
+      when.textContent = `${timeLabel(m.startTime)} – ${timeLabel(m.endTime)}`;
+      row.append(title, when);
+
+      if (m.meetLink) {
+        row.classList.add("clickable");
+        row.title = `Open "${m.title}" in Google Meet`;
+        row.addEventListener("click", () => {
+          window.open(m.meetLink, "_blank", "noopener,noreferrer");
+        });
+      }
+      meetingsBody.appendChild(row);
+    }
   }
 
   function renderMeeting(state: UiState): void {
@@ -497,10 +494,9 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     }
 
     // Optional Meet link (server populates MeetingInfo.meetLink from the calendar
-    // event's hangoutLink). Coded optimistically with optional access so this
-    // compiles before the shared `meetLink?: string` field lands. Render the
-    // external-call anchor only when a usable link is present.
-    const meetLink = (m as { meetLink?: string }).meetLink;
+    // event's hangoutLink). Render the external-call anchor only when a usable
+    // link is present.
+    const meetLink = m.meetLink;
     if (meetLink) {
       meetLinkAnchor.href = meetLink;
       meetLinkAnchor.hidden = false;
@@ -753,8 +749,16 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
 
   function renderEvents(state: UiState): void {
     eventsBody.innerHTML = "";
+    const now = Date.now();
+    const activeMeetings = [...state.myMeetings]
+      .filter((m) => m.startTime <= now && now < m.endTime)
+      .sort((a, b) => a.startTime - b.startTime);
+    for (const m of activeMeetings) {
+      eventsBody.appendChild(renderNowMeeting(m));
+    }
+
     const events = [...state.events.values()].sort((a, b) => a.startTime - b.startTime);
-    if (events.length === 0) {
+    if (events.length === 0 && activeMeetings.length === 0) {
       const empty = document.createElement("div");
       empty.className = "hud-empty";
       empty.textContent = "No events right now.";
@@ -764,6 +768,35 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     for (const ev of events) {
       eventsBody.appendChild(renderEventCard(ev, state.selfId));
     }
+  }
+
+  function renderNowMeeting(m: MeetingInfo): HTMLElement {
+    const card = document.createElement("div");
+    card.className = "now-meeting";
+    const head = document.createElement("div");
+    head.className = "event-head";
+    const emoji = document.createElement("span");
+    emoji.className = "event-emoji";
+    emoji.textContent = "📅";
+    const titleEl = document.createElement("span");
+    titleEl.className = "event-title";
+    titleEl.textContent = m.title;
+    head.append(emoji, titleEl);
+
+    const meta = document.createElement("div");
+    meta.className = "event-meta";
+    meta.textContent = `${m.roomName} · ${timeLeftLabel(m.endTime)}`;
+    card.append(head, meta);
+
+    const meetLink = m.meetLink;
+    if (meetLink) {
+      card.classList.add("clickable");
+      card.title = `Open "${m.title}" in Google Meet`;
+      card.addEventListener("click", () => {
+        window.open(meetLink, "_blank", "noopener,noreferrer");
+      });
+    }
+    return card;
   }
 
   function renderEventCard(ev: SocialEvent, selfId: string): HTMLElement {
@@ -904,7 +937,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
     renderSelfPlace(state);
     renderStatusPill(self);
     renderMeeting(state);
-    renderMeetingDetails(state.myMeeting);
+    renderMeetingDetails(state);
     renderRoster(state);
     renderRoomCall(state);
     renderEvents(state);
@@ -922,7 +955,7 @@ export function createHud(parent: HTMLElement, store: Store, cb: HudCallbacks): 
       return;
     }
     const meeting = state.myMeeting;
-    const meetLink = (meeting as { meetLink?: string } | null)?.meetLink;
+    const meetLink = meeting?.meetLink;
     if (meeting && meetLink && state.selfArea === meeting.roomName) {
       const anchor = document.createElement("a");
       anchor.className = "hud-room-meet-link";

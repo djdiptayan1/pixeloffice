@@ -25,6 +25,7 @@ export interface UiState {
   events: Map<string, SocialEvent>;
   /** The meeting the local user has been invited to (button shown), or null. */
   myMeeting: MeetingInfo | null;
+  myMeetings: MeetingInfo[];
   /** Whether the local user has clicked Join on myMeeting (label flips). */
   joinedMeeting: boolean;
   /** Current area name of the local player, as reported by the game. */
@@ -63,6 +64,7 @@ export class Store {
       players: new Map(),
       events: new Map(),
       myMeeting: null,
+      myMeetings: [],
       joinedMeeting: false,
       selfArea: "Hallway",
       activeGames: new Map(),
@@ -176,6 +178,11 @@ export class Store {
     if (this.state.myMeeting && this.state.myMeeting.id !== meetingId) return;
     this.state.myMeeting = null;
     this.state.joinedMeeting = false;
+    this.emit();
+  }
+
+  setMeetings(meetings: MeetingInfo[]): void {
+    this.state.myMeetings = meetings;
     this.emit();
   }
 

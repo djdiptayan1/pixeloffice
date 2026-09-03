@@ -184,6 +184,69 @@ describe("GoogleCalendarAdapter — current vs upcoming windowing", () => {
   });
 });
 
+
+describe("GoogleCalendarAdapter — meeting-board list (getMeetings)", () => {
+  it("returns ended + live + upcoming meetings soonest-first, incl. past ones", async () => {
+    const tokens = connectedStore();
+    const items = [
+      {
+        id: "past",
+        status: "confirmed",
+        summary: "Done earlier",
+        start: { dateTime: iso(NOW - 3_600_000) },
+        end: { dateTime: iso(NOW - 1_800_000) },
+      },
+      {
+        id: "now",
+        status: "confirmed",
+        summary: "Live",
+        start: { dateTime: iso(NOW - 1000) },
+        end: { dateTime: iso(NOW + 1000) },
+      },
+      {
+        id: "soon",
+        status: "confirmed",
+        summary: "Later",
+        start: { dateTime: iso(NOW + 3_600_000) },
+        end: { dateTime: iso(NOW + 7_200_000) },
+      },
+    ];
+    const { fetchImpl } = makeFetch({ events: () => eventsBody(items) });
+    const a = adapter(fetchImpl, tokens);
+    await a.refreshUser(USER);
+
+    const board = a.getMeetings(USER, NOW);
+    expect(board.map((m) => m.id)).toEqual(["past", "now", "soon"]);
+    // The ended meeting must NOT leak into current/upcoming windows.
+    expect(a.getCurrentMeeting(USER, NOW)?.id).toBe("now");
+    expect(a.getUpcomingMeetings(USER, NOW).map((m) => m.id)).toEqual(["soon"]);
+  });
+
+  it("returns an empty board for an unconnected user", () => {
+    const { fetchImpl } = makeFetch({});
+    const a = adapter(fetchImpl, new InMemoryGoogleTokenStore());
+    expect(a.getMeetings("nobody", NOW)).toEqual([]);
+  });
+
+  it("drops meetings that ended beyond the lookback window", async () => {
+    const tokens = connectedStore();
+    // 25h ago — outside the 24h default lookback; must not appear in the board.
+    const items = [
+      {
+        id: "ancient",
+        status: "confirmed",
+        summary: "Yesteryear",
+        start: { dateTime: iso(NOW - 26 * 3_600_000) },
+        end: { dateTime: iso(NOW - 25 * 3_600_000) },
+      },
+    ];
+    const { fetchImpl } = makeFetch({ events: () => eventsBody(items) });
+    const a = adapter(fetchImpl, tokens);
+    await a.refreshUser(USER);
+    expect(a.getMeetings(USER, NOW)).toEqual([]);
+  });
+});
+
 describe("GoogleCalendarAdapter — token mint, 401 retry, invalid_grant", () => {
   const live = {
     id: "ev1",

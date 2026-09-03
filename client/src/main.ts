@@ -27,6 +27,7 @@ import {
   type EventUpdatedPayload,
   type MeetingEndedPayload,
   type MeetingStartedPayload,
+  type MeetingsPayload,
   type PlayerJoinedPayload,
   type PlayerLeftPayload,
   type PlayerMovedPayload,
@@ -327,6 +328,7 @@ async function boot(conn: Connection, welcome: WelcomePayload): Promise<void> {
   for (const p of welcome.players) localStore.upsertPlayer(p);
   for (const ev of welcome.events) localStore.upsertEvent(ev);
   if (welcome.meeting) localStore.setMeeting(welcome.meeting);
+  localStore.setMeetings(welcome.meetings ?? []);
 
   // Multi-floor: record the active building (floor picker source) + the player's
   // authoritative current floor so the HUD floor indicator renders. Display-only
@@ -729,6 +731,9 @@ function registerBridge(conn: Connection): void {
   conn.on<MeetingEndedPayload>(S2C.MEETING_ENDED, ({ meetingId }) => {
     store?.clearMeeting(meetingId);
     toasts.show("Your meeting has ended.", "meeting");
+  });
+  conn.on<MeetingsPayload>(S2C.MEETINGS, ({ meetings }) => {
+    store?.setMeetings(meetings);
   });
 
   conn.on<ToastPayload>(S2C.TOAST, ({ message, kind }) => {

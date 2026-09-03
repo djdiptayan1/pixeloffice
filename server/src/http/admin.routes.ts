@@ -203,10 +203,9 @@ export function createAdminRouter(): Router {
         // get the in-office Join prompt. The real Google meeting overlays it for
         // connected users via CompositeCalendarAdapter.
         const shadow = container.mockCalendar.createMeeting(
-          { title, startsInMinutes, durationMinutes, participantIds, roomName },
+          { title, startsInMinutes, durationMinutes, participantIds, roomName, meetLink: googleMeeting.meetLink },
           now,
         );
-        shadow.meetLink = googleMeeting.meetLink;
         log.info("meeting scheduled", {
           meetingId: googleMeeting.id,
           title: googleMeeting.title,
@@ -231,8 +230,11 @@ export function createAdminRouter(): Router {
 
     // Seeds the mock calendar; the presence tick (~3s) detects start/end and
     // emits MEETING_STARTED/ENDED — never auto-moves avatars (agency rule).
+    const meetLink = typeof body.meetLink === "string" && body.meetLink.length > 0
+      ? body.meetLink.trim()
+      : undefined;
     const meeting = container.mockCalendar.createMeeting(
-      { title, startsInMinutes, durationMinutes, participantIds, roomName },
+      { title, startsInMinutes, durationMinutes, participantIds, roomName, meetLink },
       now,
     );
     log.info("meeting scheduled", {

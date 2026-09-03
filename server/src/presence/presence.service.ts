@@ -33,6 +33,7 @@ interface SessionRecord {
   currentMeetingId: string | null;
   /** Meeting ids the user EXPLICITLY clicked Join on (human agency). */
   joinedMeetingIds: Set<string>;
+  lastMeetingsSig: string | null;
 }
 
 const DEFAULT_AWAY_TIMEOUT_MS = 90_000;
@@ -45,9 +46,10 @@ export interface PresenceChange {
 
 /**
  * Emits:
- *   "change"          ({ sessionId, state, source })  — only on actual change
- *   "meeting-started" ({ sessionId, meeting })        — calendar meeting begins
- *   "meeting-ended"   ({ sessionId, meetingId })      — calendar meeting ends
+ *   "change"            ({ sessionId, state, source }) — only on actual change
+ *   "meeting-started"   ({ sessionId, meeting })       — calendar meeting begins
+ *   "meeting-ended"     ({ sessionId, meetingId })     — calendar meeting ends
+ *   "meetings-changed"  ({ sessionId, meetings })      — meeting-board list changed
  */
 export class PresenceService extends EventEmitter {
   private readonly records = new Map<string, SessionRecord>();
@@ -74,6 +76,7 @@ export class PresenceService extends EventEmitter {
       lastSource: "SYSTEM",
       currentMeetingId: null,
       joinedMeetingIds: new Set<string>(),
+      lastMeetingsSig: null,
     });
   }
 
@@ -177,6 +180,20 @@ export class PresenceService extends EventEmitter {
         } else if (previous) {
           this.emit("meeting-ended", { sessionId: rec.sessionId, meetingId: previous });
         }
+      }
+
+      let meetings: MeetingInfo[] = [];
+      try {
+        meetings = this.calendar.getMeetings(rec.userId, nowMs);
+      } catch {
+        meetings = [];
+      }
+      const sig = meetings
+        .map((m) => `${m.id}:${m.startTime}:${m.endTime}:${m.title}:${m.meetLink ?? ""}:${m.roomName}`)
+        .join("|");
+      if (sig !== rec.lastMeetingsSig) {
+        rec.lastMeetingsSig = sig;
+        this.emit("meetings-changed", { sessionId: rec.sessionId, meetings });
       }
 
       if (result.state !== rec.lastState || result.source !== rec.lastSource) {
